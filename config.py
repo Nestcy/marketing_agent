@@ -9,7 +9,7 @@
 # export OPENAI_API_KEY="sk-..."
 # export STABILITY_API_KEY="sk-..."
 # export GROQ_API_KEY="gsk_..."
-# export GROQ_MODEL="qwen/qwen3.6-27b"
+# export GROQ_MODEL="...."
 # export HEYGEN_API_KEY="..."
 # export RUNWAY_API_KEY="..."
 # export LUMA_API_KEY="..."
