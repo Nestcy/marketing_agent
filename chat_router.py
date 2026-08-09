@@ -34,9 +34,8 @@ TOOLS = [
             "name": "start_campaign",
             "description": (
                 "Start a brand new content calendar for a business — researches the "
-                "business and drafts a full day-by-day content calendar for review. "
-                "Ask for goal, audience, and timeframe (30 or 90 days) if missing "
-                "before calling this."
+                "business and drafts a focused 3-day (3d) content calendar outline for review. "
+                "Ask for goal and audience if missing before calling this."
             ),
             "parameters": {
                 "type": "object",
@@ -44,12 +43,12 @@ TOOLS = [
                     "business_context": {"type": "string"},
                     "campaign_goal": {"type": "string"},
                     "target_audience": {"type": "string"},
-                    "timeframe_days": {"type": "integer", "enum": [30, 90]},
+                    "timeframe_days": {"type": "integer", "default": 3},
                     "user_plan": {"type": "string", "enum": ["free", "paid"]},
                     "business_website_url": {"type": "string"},
                     "facebook_page_url": {"type": "string"},
                 },
-                "required": ["business_context", "campaign_goal", "target_audience", "timeframe_days"],
+                "required": ["business_context", "campaign_goal", "target_audience"],
             },
         },
     },
@@ -132,6 +131,18 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "tweak_image",
+            "description": "The user specifically wants to tweak or refine the generated image for ONE day. Records image style feedback and regenerates the visual asset.",
+            "parameters": {
+                "type": "object",
+                "properties": {"campaign_id": {"type": "string"}, "date": {"type": "string"}, "feedback": {"type": "string"}},
+                "required": ["campaign_id", "date", "feedback"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_campaigns",
             "description": "List all campaign_ids that have ever been started.",
             "parameters": {"type": "object", "properties": {}},
@@ -140,28 +151,23 @@ TOOLS = [
 ]
 
 _SYSTEM_PROMPT = """You are the conversational front-end for an organic
-content marketing platform. Flow: a campaign starts with a full
-day-by-day content calendar draft, which the business owner must
-approve (or ask for changes to) before any daily content gets
-generated. Once approved, each day's actual ad (image + caption) gets
-generated and must ALSO be approved individually — approving a day
-marks it finished and ready for the business to use. This platform
-does not post or crosspost anywhere yet (that's a separate, future
-feature) — be clear about that if the user asks whether something has
-been "posted."
+content marketing platform. Flow: a campaign starts with a 3-day (3d)
+content calendar draft, which the business owner must approve (or ask for
+changes to) before any daily content gets generated. Once approved, each day's
+actual ad (image + caption) gets generated via daily tasks or on demand, and
+asks for image references when personalized style images require real photos.
+Each day's draft must be approved individually by the business owner, who can
+also tweak or refine the images whenever they wish.
 
 Distinguish carefully between:
-- refine_plan: feedback about the OVERALL calendar/strategy
+- refine_plan: feedback about the OVERALL 3-day calendar/strategy
 - tweak_day: feedback about ONE specific day's draft
-Ask which the user means if it's ambiguous whether their feedback
-applies to the whole calendar or just one day.
+- tweak_image: feedback specifically targeting ONE day's generated image visual style
+Ask which the user means if it's ambiguous.
 
-If the user hasn't given a campaign_id for an action that needs one,
-ask, or offer to list their campaigns. Never invent campaign_id or date
-values.
+If the user hasn't given a campaign_id for an action that needs one, ask, or offer to list their campaigns. Never invent campaign_id or date values.
 
-Reference photo uploads happen via a separate file-upload UI element,
-not through you — direct users there if they mention uploading a photo.
+Reference photo uploads happen via a separate file-upload UI element, not through you — direct users there if they mention uploading a photo.
 """
 
 
@@ -206,6 +212,9 @@ def _execute_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
 
         if name == "tweak_day":
             return manager.tweak_day(args["campaign_id"], args["date"], args["feedback"])
+
+        if name == "tweak_image":
+            return manager.tweak_image(args["campaign_id"], args["date"], args["feedback"])
 
         if name == "list_campaigns":
             return {"campaign_ids": manager.list_campaign_ids()}

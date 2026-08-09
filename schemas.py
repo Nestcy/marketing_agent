@@ -3,12 +3,11 @@
 # Pydantic models for structured LLM output via generate_structured().
 #
 # Deliberately two small, flat schemas rather than one big one:
-#   - StrategyOutline: a handful of fields, ONE call regardless of
-#     timeframe (30 or 90 days) — this is what keeps token use low.
+#   - StrategyOutline: a handful of fields, ONE call for a 3-day (3d)
+#     content calendar — this keeps token use low and respects rate limits.
 #   - DayContentOutput: the day's idea/platform/reference-need AND its
 #     caption/image_prompt, combined into a single call, made once per
-#     day (only when that day is actually about to be generated, not
-#     upfront for the whole timeframe).
+#     day (only when that day is actually about to be generated).
 # ---------------------------------------------------------
 
 from typing import List, Optional
@@ -36,7 +35,8 @@ class DayContentOutput(BaseModel):
     idea: str = Field(..., description="Today's specific content idea, drawn from the strategy's content pillars — should not repeat a recently-used idea.")
     platform: str = Field(..., description="Which single platform today's post targets, e.g. instagram, facebook, tiktok.")
     needs_reference_photo: bool = Field(
-        ..., description="True if today's idea needs a real business-supplied photo (product, founder, team, store) to be accurate rather than a purely AI-imagined image."
+        ..., description="True if today's idea requires a real business-supplied reference photo (product, founder, team, venue) to render a personalized style image accurately."
     )
     caption: str = Field(..., max_length=280, description="The post caption/copy for today.")
     image_prompt: str = Field(..., description="A detailed text-to-image prompt describing the visual for today's post.")
+

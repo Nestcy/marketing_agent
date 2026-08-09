@@ -144,9 +144,9 @@ def _full_business_context(state: MarketingState) -> str:
 # ---------------------------------------------------------
 
 _PLANNER_SYSTEM_PROMPT = """You are a senior organic social media strategist.
-Given a business, a campaign goal, a target audience, and a timeframe,
-produce a SHORT strategic outline — not a day-by-day calendar, just the
-recurring structure that will guide day-by-day content decisions later.
+Given a business, a campaign goal, a target audience, and a 3-day timeframe (3d content calendar),
+produce a SHORT strategic outline — not a long calendar, just the
+recurring structure that will guide day-by-day content decisions for this 3-day scope.
 
 Respond ONLY with the structured output requested:
 - content_pillars: 3-6 recurring themes to rotate through (e.g. product
@@ -163,20 +163,20 @@ provided. If a "Learned preferences" section is given, follow it.
 
 def master_planner_node(state: MarketingState):
     """
-    Generates the lightweight strategy outline in ONE LLM call. Always
-    sets plan_status='draft' — approval is a separate, explicit step
+    Generates the lightweight 3-day strategy outline in ONE LLM call.
+    Always sets plan_status='draft' — approval is a separate, explicit step
     outside this graph. calendar_dates (the plain list of ISO dates for
-    the timeframe) is computed here in Python, no LLM call needed for
-    that part — it's just today + timeframe_days.
+    the 3-day timeframe) is computed here in Python, no LLM call needed for
+    that part — it's just today + timeframe_days (default 3).
     """
     import campaign_preferences
 
-    state["logs"].append("[Planner] Generating lightweight strategy outline...")
+    state["logs"].append("[Planner] Generating lightweight 3-day strategy outline...")
 
     campaign_id = state.get("campaign_id", "")
     prefs_text = campaign_preferences.get_preferences_text(campaign_id) if campaign_id else ""
 
-    timeframe_days = state.get("timeframe_days", 30)
+    timeframe_days = state.get("timeframe_days", 3)
     start_date = datetime.date.today()
     calendar_dates = [(start_date + datetime.timedelta(days=i)).isoformat() for i in range(timeframe_days)]
 
@@ -199,7 +199,7 @@ def master_planner_node(state: MarketingState):
             "calendar_dates": calendar_dates,
             "calendar_plan": {},  # populated incrementally, one day at a time, as each day is actually generated
             "plan_status": "draft",
-            "logs": [f"[Planner] Strategy outline generated ({len(outline.get('content_pillars', []))} content pillars), awaiting approval."],
+            "logs": [f"[Planner] 3-day strategy outline generated ({len(outline.get('content_pillars', []))} content pillars), awaiting approval."],
         }
     except Exception as e:
         fallback_outline = {

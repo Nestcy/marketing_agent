@@ -7,10 +7,17 @@
 
 from typing import Type, TypeVar
 
-from langchain_groq import ChatGroq
-from langchain_core.messages import SystemMessage, HumanMessage
-from pydantic import BaseModel
+try:
+    from langchain_groq import ChatGroq
+    from langchain_core.messages import SystemMessage, HumanMessage
+    _HAS_LANGCHAIN = True
+except ImportError:
+    _HAS_LANGCHAIN = False
+    ChatGroq = None
+    SystemMessage = None
+    HumanMessage = None
 
+from pydantic import BaseModel
 import config
 
 T = TypeVar("T", bound=BaseModel)

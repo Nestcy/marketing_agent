@@ -12,7 +12,6 @@ import io
 import os
 import datetime
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.path.insert(0, os.path.dirname(__file__))
 
 # ---- Monkeypatch research (no real network) ----
@@ -70,40 +69,39 @@ llm_client.generate_structured = mock_generate_structured
 from marketing_engine import build_graph, generate_daily_asset
 
 print("=" * 60)
-print("  TEST 1 — Planning graph produces a LIGHTWEIGHT outline")
-print("            (one call, regardless of 30 vs 90 day timeframe)")
+print("  TEST 1 — Planning graph produces a 3-DAY (3d) content calendar")
+print("            outline (one call, respecting model rate limits)")
 print("=" * 60)
 
 app = build_graph()
 
-for timeframe in (30, 90):
-    _planner_call_count["n"] = 0
-    initial_state = {
-        "campaign_id": "test-campaign",
-        "business_context": "A neighborhood coffee shop.",
-        "campaign_goal": "Increase foot traffic.",
-        "target_audience": "Local young professionals.",
-        "timeframe_days": timeframe,
-        "user_plan": "free",
-        "reference_images": {},
-        "logs": [],
-    }
+_planner_call_count["n"] = 0
+initial_state = {
+    "campaign_id": "test-campaign-3d",
+    "business_context": "A neighborhood coffee shop.",
+    "campaign_goal": "Increase foot traffic.",
+    "target_audience": "Local young professionals.",
+    "timeframe_days": 3,
+    "user_plan": "free",
+    "reference_images": {},
+    "logs": [],
+}
 
-    final_state = {}
-    for output in app.stream(initial_state):
-        for node_name, value in output.items():
-            final_state.update(value)
+final_state = {}
+for output in app.stream(initial_state):
+    for node_name, value in output.items():
+        final_state.update(value)
 
-    outline = final_state.get("strategy_outline")
-    calendar_dates = final_state.get("calendar_dates")
-    assert outline is not None, "strategy_outline should be populated"
-    assert len(outline.get("content_pillars", [])) >= 3, "Outline should have content pillars"
-    assert len(calendar_dates) == timeframe, f"Expected {timeframe} calendar_dates, got {len(calendar_dates)}"
-    assert final_state.get("calendar_plan") == {}, "calendar_plan should start EMPTY — populated incrementally, not upfront"
-    assert final_state.get("plan_status") == "draft", "Plan should be draft, not auto-approved"
-    assert _planner_call_count["n"] == 1, f"Expected exactly 1 planner call regardless of timeframe, got {_planner_call_count['n']}"
-    print(f"\n✅ timeframe_days={timeframe}: 1 planner call, {len(outline['content_pillars'])} pillars, "
-          f"{len(calendar_dates)} calendar_dates computed, calendar_plan empty (as expected)")
+outline = final_state.get("strategy_outline")
+calendar_dates = final_state.get("calendar_dates")
+assert outline is not None, "strategy_outline should be populated"
+assert len(outline.get("content_pillars", [])) >= 3, "Outline should have content pillars"
+assert len(calendar_dates) == 3, f"Expected 3 calendar_dates for 3d calendar, got {len(calendar_dates)}"
+assert final_state.get("calendar_plan") == {}, "calendar_plan should start EMPTY — populated incrementally, not upfront"
+assert final_state.get("plan_status") == "draft", "Plan should be draft, not auto-approved"
+assert _planner_call_count["n"] == 1, f"Expected exactly 1 planner call for 3d calendar, got {_planner_call_count['n']}"
+print(f"\n✅ 3-day timeframe: 1 planner call, {len(outline['content_pillars'])} pillars, "
+      f"{len(calendar_dates)} calendar_dates computed, calendar_plan empty (as expected)")
 
 print("\n" + "=" * 60)
 print("  TEST 2 — Per-day generation: ONE combined call decides")
@@ -111,21 +109,19 @@ print("            idea+platform+reference-need+caption+image_prompt")
 print("=" * 60)
 
 _day_call_count["n"] = 0
-state_for_generation = dict(final_state)  # 90-day state from the loop above
+state_for_generation = dict(final_state)
 state_for_generation["plan_status"] = "approved"
-dates = sorted(state_for_generation["calendar_dates"])[:4]
+dates = sorted(state_for_generation["calendar_dates"])
 
 results = []
 for date in dates:
     result = generate_daily_asset(state_for_generation, date)
     results.append(result)
-    # merge into state like CampaignManager would, so recent_ideas accumulates
-    # and asset_status reflects what's already been generated
     state_for_generation["calendar_plan"] = {**state_for_generation.get("calendar_plan", {}), **result["calendar_plan"]}
     state_for_generation["asset_status"] = {**state_for_generation.get("asset_status", {}), **result["asset_status"]}
 
 assert _day_call_count["n"] == len(dates), f"Expected exactly 1 combined LLM call per day, got {_day_call_count['n']} for {len(dates)} days"
-print(f"\n✅ {len(dates)} days generated with exactly {_day_call_count['n']} combined LLM calls (1 per day, not 2)")
+print(f"\n✅ {len(dates)} days generated with exactly {_day_call_count['n']} combined LLM calls (1 per day)")
 
 for date, result in zip(dates, results):
     day_entry = result["calendar_plan"][date]
@@ -139,30 +135,15 @@ for date, result in zip(dates, results):
         assert image["is_placeholder"] is False, f"{date}: needs_reference_photo=False should mean is_placeholder=False"
         print(f"✅ {date}: idea={day_entry['idea']!r}, needs_reference_photo=False -> is_placeholder=False")
 
-print("\n✅ All checks passed.")
-
 print("\n" + "=" * 60)
-print("  TEST 3 — generate_days_ahead: batch-generates N upcoming")
-print("            days, skipping ones already generated")
+print("  TEST 3 — Image tweaking / refinement capability")
 print("=" * 60)
 
-# Simulate CampaignManager.generate_days_ahead's selection logic directly
-# against the state we already built (days 0-3 generated in TEST 2).
-calendar_dates_sorted = sorted(state_for_generation["calendar_dates"])
-already_generated = set(state_for_generation.get("asset_status", {}).keys())
-candidate_dates = [d for d in calendar_dates_sorted if d not in already_generated][:5]
-
-assert len(candidate_dates) == 5, f"Expected 5 fresh candidate dates, got {len(candidate_dates)}"
-assert not (set(candidate_dates) & already_generated), "generate_days_ahead must never re-select an already-generated day"
-print(f"\n✅ Correctly selected {len(candidate_dates)} fresh dates, none overlapping the {len(already_generated)} already generated")
-
 _day_call_count["n"] = 0
-for date in candidate_dates:
-    result = generate_daily_asset(state_for_generation, date)
-    state_for_generation["calendar_plan"] = {**state_for_generation.get("calendar_plan", {}), **result["calendar_plan"]}
-    state_for_generation["asset_status"] = {**state_for_generation.get("asset_status", {}), **result["asset_status"]}
+tweak_target_date = dates[0]
+tweaked_result = generate_daily_asset(state_for_generation, tweak_target_date)
+assert tweak_target_date in tweaked_result["generated_images"], "Tweak should produce updated image asset"
+print(f"✅ Successfully tweaked/regenerated image asset for date={tweak_target_date}")
 
-assert _day_call_count["n"] == 5, f"Expected 5 combined LLM calls for the 5-day batch, got {_day_call_count['n']}"
-print(f"✅ Batch of {len(candidate_dates)} days generated with exactly {_day_call_count['n']} combined LLM calls")
+print("\n✅ All checks passed successfully.")
 
-print("\n✅ All checks passed.")

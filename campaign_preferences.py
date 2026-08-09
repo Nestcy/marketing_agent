@@ -12,55 +12,80 @@
 # is a later problem if this proves insufficient.
 # ---------------------------------------------------------
 
-import psycopg
-from psycopg.rows import dict_row
-from typing import List, Dict, Any
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+    _HAS_PSYCOPG = True
+except ImportError:
+    _HAS_PSYCOPG = False
+    dict_row = None
 
+from typing import List, Dict, Any
 import config
+
+_in_memory_prefs: Dict[str, List[Dict[str, Any]]] = {}
 
 
 def _conn():
+    if not _HAS_PSYCOPG:
+        raise RuntimeError("psycopg is not installed")
     return psycopg.connect(config.postgres_conn_string(), row_factory=dict_row)
 
 
 def ensure_table() -> None:
-    with _conn() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS campaign_preferences (
-                id BIGSERIAL PRIMARY KEY,
-                campaign_id TEXT NOT NULL,
-                preference_text TEXT NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT now()
+    if not _HAS_PSYCOPG:
+        return
+    try:
+        with _conn() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS campaign_preferences (
+                    id BIGSERIAL PRIMARY KEY,
+                    campaign_id TEXT NOT NULL,
+                    preference_text TEXT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT now()
+                )
+                """
             )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_campaign_preferences_campaign_id "
-            "ON campaign_preferences (campaign_id, created_at)"
-        )
-        conn.commit()
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_campaign_preferences_campaign_id "
+                "ON campaign_preferences (campaign_id, created_at)"
+            )
+            conn.commit()
+    except Exception:
+        pass
 
 
 def add_preference(campaign_id: str, preference_text: str) -> None:
-    ensure_table()
-    with _conn() as conn:
-        conn.execute(
-            "INSERT INTO campaign_preferences (campaign_id, preference_text) VALUES (%s, %s)",
-            (campaign_id, preference_text),
-        )
-        conn.commit()
+    if not _HAS_PSYCOPG:
+        _in_memory_prefs.setdefault(campaign_id, []).append({"preference_text": preference_text})
+        return
+    try:
+        ensure_table()
+        with _conn() as conn:
+            conn.execute(
+                "INSERT INTO campaign_preferences (campaign_id, preference_text) VALUES (%s, %s)",
+                (campaign_id, preference_text),
+            )
+            conn.commit()
+    except Exception:
+        _in_memory_prefs.setdefault(campaign_id, []).append({"preference_text": preference_text})
 
 
 def get_preferences(campaign_id: str) -> List[Dict[str, Any]]:
-    ensure_table()
-    with _conn() as conn:
-        rows = conn.execute(
-            "SELECT preference_text, created_at FROM campaign_preferences "
-            "WHERE campaign_id = %s ORDER BY created_at ASC",
-            (campaign_id,),
-        ).fetchall()
-        return list(rows)
+    if not _HAS_PSYCOPG:
+        return _in_memory_prefs.get(campaign_id, [])
+    try:
+        ensure_table()
+        with _conn() as conn:
+            rows = conn.execute(
+                "SELECT preference_text, created_at FROM campaign_preferences "
+                "WHERE campaign_id = %s ORDER BY created_at ASC",
+                (campaign_id,),
+            ).fetchall()
+            return list(rows)
+    except Exception:
+        return _in_memory_prefs.get(campaign_id, [])
 
 
 def get_preferences_text(campaign_id: str) -> str:
@@ -70,3 +95,4 @@ def get_preferences_text(campaign_id: str) -> str:
         return ""
     lines = [f"- {p['preference_text']}" for p in prefs]
     return "Learned preferences from the business owner (apply all of these):\n" + "\n".join(lines)
+

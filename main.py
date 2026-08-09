@@ -53,7 +53,7 @@ class StartCampaignRequest(BaseModel):
     business_context: str = Field(..., example="A neighborhood coffee shop known for single-origin pour-overs.")
     campaign_goal: str = Field(..., example="Increase foot traffic and build a loyal local following.")
     target_audience: str = Field(..., example="Young professionals and students nearby.")
-    timeframe_days: int = Field(30, description="30 or 90 — how many days of content to plan.")
+    timeframe_days: int = Field(3, description="Default 3-day (3d) content calendar timeframe to respect model rate limits.")
     user_plan: str = Field("free", description="'free' (Gemini free-tier images) or 'paid' (DALL-E 3 / Stable Diffusion).")
     auto_generate_buffer_days: int = Field(1, ge=1, le=14, description="How many days ahead the daily cron keeps generated/awaiting review, beyond just today. Default 1 (today only) — raise this if you want the cron to always keep a few days' worth of drafts ready.")
     business_website_url: Optional[str] = None
@@ -190,6 +190,17 @@ def tweak_day(campaign_id: str, date: str, request: TweakRequest):
     manager = get_manager()
     try:
         result = manager.tweak_day(campaign_id, date, request.feedback)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
+
+
+@app.post("/api/campaign/{campaign_id}/day/{date}/tweak-image")
+def tweak_image(campaign_id: str, date: str, request: TweakRequest):
+    """Records image style feedback and regenerates specifically the image asset for this day using the image model."""
+    manager = get_manager()
+    try:
+        result = manager.tweak_image(campaign_id, date, request.feedback)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return result

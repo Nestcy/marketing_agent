@@ -57,6 +57,14 @@ def generate_due_drafts() -> List[Dict[str, Any]]:
                 result = manager.generate_day_asset(campaign_id, date)
                 results.append({"campaign_id": campaign_id, "date": date, "result": result})
 
+                day_plan = (result.get("calendar_plan") or {}).get(date, {})
+                needs_ref = day_plan.get("needs_reference_photo", False)
+                ref_images = state.get("reference_images") or {}
+                has_ref = date in ref_images
+
+                if needs_ref and not has_ref:
+                    notify_reference_needed.delay(campaign_id, date)
+
                 if result.get("status") == "awaiting_approval":
                     notify_ready_for_review.delay(campaign_id, date)
                 else:
@@ -73,10 +81,8 @@ def generate_due_drafts() -> List[Dict[str, Any]]:
 def notify_ready_for_review(campaign_id: str, date: str) -> None:
     """
     Fires once a day's draft is generated and ready for the owner to
-    review/approve. Notification hook — wire in email/Slack/in-app
-    once you've picked a provider.
+    review/approve. Notification hook — wire in email/Slack/in-app.
     """
-    # TODO: replace with a real notification.
     print(f"[REVIEW NEEDED] campaign={campaign_id} date={date}: draft ready for approval.")
     import campaign_events
     campaign_events.log_event(
@@ -84,17 +90,27 @@ def notify_ready_for_review(campaign_id: str, date: str) -> None:
     )
 
 
+@celery_app.task(name="tasks.notify_reference_needed")
+def notify_reference_needed(campaign_id: str, date: str) -> None:
+    """
+    Fires when today's generated asset identified that a real reference photo is needed
+    to render a personalized style image accurately.
+    """
+    print(f"[REFERENCE NEEDED] campaign={campaign_id} date={date}: real photo requested for personalized style asset.")
+    import campaign_events
+    campaign_events.log_event(
+        campaign_id, "reference_photo_requested", payload={"date": date}, source="cron"
+    )
+
+
 @celery_app.task(name="tasks.notify_generation_failed")
 def notify_generation_failed(campaign_id: str, date: str, reason: str) -> None:
     """
-    Fires when a day's draft generation actually failed (e.g. an image
-    provider error) — reference photos no longer block generation at
-    all (see generate_daily_asset's placeholder-image behavior), so
-    this is purely a real-failure alert now, not a "needs a photo"
-    notice. Notification hook — same TODO as above.
+    Fires when a day's draft generation actually failed (e.g. an image provider error).
     """
     print(f"[GENERATION FAILED] campaign={campaign_id} date={date}: {reason}")
     import campaign_events
     campaign_events.log_event(
         campaign_id, "generation_failed", payload={"date": date, "reason": reason}, source="cron"
     )
+

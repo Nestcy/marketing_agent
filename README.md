@@ -1,34 +1,31 @@
-# Marketing Agent (v3 — organic content calendar, two approval gates)
+# Marketing Agent (v3 — 3D Organic Content Calendar & Daily Asset Generation)
 
 Autonomous organic content platform: researches a business (Tavily +
-Firecrawl), drafts a full day-by-day content calendar (30 or 90 days),
-and — once approved — generates each day's image + caption one at a
-time, publishing to Facebook/Instagram only after explicit owner
-approval of that specific day. No ad budget, no ad-platform spend —
-this is organic crossposting.
+Firecrawl), drafts a focused **3-day (3d) content calendar outline** to respect
+model rate limits, and — once approved — follows through with daily cron jobs or tasks
+that generate captions and image prompts for each day using image models. Where personalized
+style images require real photos, it prompts the business owner for reference images, while
+allowing owners to refine or tweak images whenever they wish.
 
-## The two approval gates
+## The two approval gates & image tweaking
 
-1. **Plan gate** — `start_campaign()` produces a LIGHTWEIGHT strategy
-   outline (content pillars, tone, platform mix) — NOT a full day-by-day
-   calendar. One small LLM call regardless of a 30 or 90 day timeframe;
-   this is the main token-savings change. Owner either `approve_plan()`s
-   it, or `refine_plan()`s it with feedback (regenerates the outline —
-   still one small call).
-2. **Day gate** — once approved, each day's draft (idea, platform,
-   reference-need, caption, and image, ALL decided in one combined call)
-   gets generated (by cron or on-demand) ONLY when that day is actually
-   about to be reviewed — never speculatively for future days — and sits
-   at `awaiting_approval`. Owner either `approve_day()`s it (finalizes
-   it — no publishing anywhere yet, that's a future Lovable-side
-   feature) or `tweak_day()`s it with feedback (regenerates just that
-   day, still requires approval after).
+1. **Plan gate** — `start_campaign()` produces a LIGHTWEIGHT 3-day strategy
+   outline (content pillars, tone, platform mix). One small LLM call for a 3-day (3d) scope,
+   preventing model rate limit exhaustion. Owner either `approve_plan()`s
+   it, or `refine_plan()`s it with feedback.
+2. **Day gate & Image Tweaking** — once approved, each day's asset draft (idea, platform,
+   reference-need, caption, and image prompt) gets generated (by daily cron or on-demand)
+   ONLY when that day is actually about to be reviewed.
+   - If a personalized style image requires authentic business photos, `needs_reference_photo`
+     is flagged and `notify_reference_needed` dispatches a request to the business owner.
+   - Owners can `tweak_image()` specifically to refine the visual style using custom feedback.
+   - Owner `approve_day()`s the final asset once satisfied.
 
-**Feedback compounds.** Every `refine_plan`/`tweak_day` call appends to
+**Feedback compounds.** Every `refine_plan`/`tweak_day`/`tweak_image` call appends to
 `campaign_preferences` (Postgres), and that full accumulated list gets
 injected into every future generation prompt — plan regeneration AND
-every day's caption/image prompt. Say "less product-focused" once on
-day 3, and day 10 already reflects it.
+every day's caption/image prompt. Say "less product-focused" or "more vibrant lighting"
+once, and future generations already reflect it.
 
 ## What runs where
 

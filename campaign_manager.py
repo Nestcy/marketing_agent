@@ -75,7 +75,7 @@ class CampaignManager:
             "business_context": brief["business_context"],
             "campaign_goal": brief["campaign_goal"],
             "target_audience": brief["target_audience"],
-            "timeframe_days": brief.get("timeframe_days", 30),
+            "timeframe_days": brief.get("timeframe_days", 3),
             "user_plan": brief.get("user_plan", "free"),
             "auto_generate_buffer_days": brief.get("auto_generate_buffer_days", 1),
             "business_website_url": brief.get("business_website_url"),
@@ -233,6 +233,15 @@ class CampaignManager:
         """
         campaign_preferences.add_preference(campaign_id, feedback)
         campaign_events.log_event(campaign_id, "asset_tweaked", payload={"date": date, "feedback": feedback}, source="api")
+        return self.generate_day_asset(campaign_id, date)
+
+    def tweak_image(self, campaign_id: str, date: str, feedback: str) -> Dict[str, Any]:
+        """
+        Appends image refinement feedback to learned preferences and regenerates
+        specifically the image asset for this day using the image model.
+        """
+        campaign_preferences.add_preference(campaign_id, f"Image style preference: {feedback}")
+        campaign_events.log_event(campaign_id, "image_tweaked", payload={"date": date, "feedback": feedback}, source="api")
         return self.generate_day_asset(campaign_id, date)
 
     def submit_reference_image(self, campaign_id: str, date: str, image_bytes: bytes) -> Dict[str, Any]:
