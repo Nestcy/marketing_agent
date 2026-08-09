@@ -124,14 +124,10 @@ _PLANNER_SYSTEM_PROMPT = """You are a senior organic social media strategist.
 Given a business, a campaign goal, a target audience, and a timeframe in
 days, produce a day-by-day content calendar — one post idea per day.
 
-<<<<<<< HEAD
 Respond ONLY with the structured output requested: a LIST of day
 entries, one per date, each with its own date field set to the exact
 date string it corresponds to. For each entry:
 - date: the exact date string this entry is for (from the list of dates given below)
-=======
-Respond ONLY with the structured output requested. For each day:
->>>>>>> 4b0816895dfa61dc15c9d672ff553381b4526119
 - idea: a short, specific content concept (not generic filler)
 - platform: which single platform this post is best suited for
   (instagram, facebook, or tiktok)
@@ -149,7 +145,6 @@ follow every point in it.
 """
 
 
-<<<<<<< HEAD
 _CALENDAR_CHUNK_SIZE = 20  # days per LLM call — keeps each tool-call response small/reliable
                             # rather than risking one giant 90-entry call
 
@@ -180,10 +175,6 @@ def master_planner_node(state: MarketingState):
     Always sets plan_status='draft' — approval is a separate, explicit
     step outside this graph.
     """
-=======
-def master_planner_node(state: MarketingState):
-    """Generates the full timeframe_days calendar in one call. Always sets plan_status='draft' — approval is a separate, explicit step outside this graph."""
->>>>>>> 4b0816895dfa61dc15c9d672ff553381b4526119
     import campaign_preferences
 
     state["logs"].append("[Planner] Generating day-by-day content calendar...")
@@ -193,7 +184,6 @@ def master_planner_node(state: MarketingState):
 
     timeframe_days = state.get("timeframe_days", 30)
     start_date = datetime.date.today()
-<<<<<<< HEAD
     all_dates = [(start_date + datetime.timedelta(days=i)).isoformat() for i in range(timeframe_days)]
 
     chunks = [all_dates[i:i + _CALENDAR_CHUNK_SIZE] for i in range(0, len(all_dates), _CALENDAR_CHUNK_SIZE)]
@@ -246,46 +236,6 @@ def master_planner_node(state: MarketingState):
 
     log_lines.append(f"[Planner] Finished. {len(calendar)}-day calendar built across {len(chunks)} chunk(s) (awaiting approval).")
     return {"calendar_plan": calendar, "plan_status": "draft", "logs": log_lines}
-=======
-    date_list = [(start_date + datetime.timedelta(days=i)).isoformat() for i in range(timeframe_days)]
-
-    user_prompt = (
-        f"Business: {_full_business_context(state)}\n"
-        f"Campaign goal: {state['campaign_goal']}\n"
-        f"Target audience: {state['target_audience']}\n"
-        f"Timeframe: {timeframe_days} days\n"
-        f"Dates to plan (use these exact date strings as keys): {date_list}\n"
-        f"{prefs_text}"
-    )
-
-    try:
-        from llm_client import generate_structured
-        from schemas import PlannerOutput
-
-        result: PlannerOutput = generate_structured(_PLANNER_SYSTEM_PROMPT, user_prompt, PlannerOutput)
-        calendar = {date: day.model_dump() for date, day in result.calendar_plan.days.items()}
-        return {
-            "calendar_plan": calendar,
-            "plan_status": "draft",
-            "logs": [f"[Planner] Generated {len(calendar)}-day calendar (validated, awaiting approval)."],
-        }
-    except Exception as e:
-        # Fallback: a small repeating mock pattern rather than a full mock calendar
-        mock_calendar = {}
-        pattern = [
-            {"idea": "Product highlight post", "platform": "instagram", "needs_reference_photo": True},
-            {"idea": "Behind the scenes look", "platform": "instagram", "needs_reference_photo": True},
-            {"idea": "Customer testimonial graphic", "platform": "facebook", "needs_reference_photo": False},
-            {"idea": "Quick tip / educational post", "platform": "tiktok", "needs_reference_photo": False},
-        ]
-        for i, date in enumerate(date_list):
-            mock_calendar[date] = pattern[i % len(pattern)]
-        return {
-            "calendar_plan": mock_calendar,
-            "plan_status": "draft",
-            "logs": [f"[Planner] LLM call failed ({e}); used fallback repeating pattern."],
-        }
->>>>>>> 4b0816895dfa61dc15c9d672ff553381b4526119
 
 
 def _add_planning_nodes_and_edges(workflow: StateGraph) -> None:

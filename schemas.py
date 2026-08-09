@@ -11,12 +11,8 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
-<<<<<<< HEAD
 class DayPlanEntry(BaseModel):
     date: str = Field(..., description="ISO date string for this day, e.g. 2026-08-10")
-=======
-class DayPlan(BaseModel):
->>>>>>> 4b0816895dfa61dc15c9d672ff553381b4526119
     idea: str = Field(..., description="The content idea/concept for this day's post.")
     platform: str = Field(..., description="Which platform this post targets, e.g. instagram, facebook, tiktok.")
     needs_reference_photo: bool = Field(
@@ -26,7 +22,6 @@ class DayPlan(BaseModel):
 
 class CalendarPlan(BaseModel):
     """
-<<<<<<< HEAD
     A LIST of day entries (each with its own date field), not a dict
     keyed by date — a dict with dynamic string keys converts to a JSON
     schema shape that tool-calling backends handle unreliably at scale
@@ -36,14 +31,6 @@ class CalendarPlan(BaseModel):
     the structured call returns.
     """
     days: List[DayPlanEntry] = Field(..., min_length=1)
-=======
-    Keyed by ISO date string ("2026-08-10"), one entry per day of the
-    requested timeframe. Using a flat Dict[str, DayPlan] rather than a
-    deeply nested structure keeps this easy for the model to produce
-    reliably via tool-calling.
-    """
-    days: Dict[str, DayPlan] = Field(..., min_length=1)
->>>>>>> 4b0816895dfa61dc15c9d672ff553381b4526119
 
 
 class PlannerOutput(BaseModel):
