@@ -312,12 +312,15 @@ def generate_daily_asset(state: Dict[str, Any], date: str) -> Dict[str, Any]:
     a partial MarketingState update — caller (CampaignManager) merges
     this into persisted state.
 
-    If the day's idea needs a reference photo and none has been
-    supplied yet (state["reference_images"].get(date)), image
-    generation is skipped and asset_status is left as
-    "pending_generation" rather than "awaiting_approval" — the caller
-    should notify the business rather than presenting an incomplete
-    draft for review.
+    Every day always gets a real AI-generated image + caption — there is
+    no path where only a caption comes back. If the day's idea is
+    flagged needs_reference_photo (a real product/founder/store photo
+    would improve accuracy) and none has been supplied yet, the image
+    is still generated from the text prompt as a first-pass draft, and
+    the day is marked "awaiting_approval" like any other day — with an
+    additional note that a reference photo is available to improve it.
+    Uploading a reference photo later regenerates the image via
+    image-to-image on top of this draft; it was never a hard blocker.
     """
     import campaign_preferences
     from llm_client import generate_structured
@@ -352,20 +355,31 @@ def generate_daily_asset(state: Dict[str, Any], date: str) -> Dict[str, Any]:
 
     reference_images = state.get("reference_images") or {}
     needs_reference = day_plan.get("needs_reference_photo", False)
+    has_reference = date in reference_images
+    used_placeholder_reference = needs_reference and not has_reference
 
-    if needs_reference and date not in reference_images:
-        return {
-            "generated_captions": {date: caption},
-            "asset_status": {date: "pending_generation"},
-        }
+    if used_placeholder_reference:
+        # No real photo yet — still generate a real image, just make the
+        # prompt explicit that this is a stand-in composition rather than
+        # the actual product/subject, so it reads as plausible generic
+        # content instead of confidently wrong specifics.
+        image_prompt = (
+            f"{image_prompt}\n\n"
+            f"Note: this is a placeholder/stand-in image — do not invent "
+            f"specific branding, logos, or exact product details. Keep it "
+            f"generic and stylistically appropriate; it will be replaced "
+            f"with an accurate version once the business supplies a real "
+            f"reference photo."
+        )
 
     user_plan = state.get("user_plan") or "free"
     model = "gemini_free" if user_plan != "paid" else "dalle3"
     try:
         image_result = generate_image(prompt=image_prompt, model_preference=model)
+        image_result["is_placeholder"] = used_placeholder_reference
         image_ok = True
     except Exception as e:
-        image_result = {"model": model, "url": None, "error": str(e)}
+        image_result = {"model": model, "url": None, "error": str(e), "is_placeholder": used_placeholder_reference}
         image_ok = False
 
     return {

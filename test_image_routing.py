@@ -97,18 +97,24 @@ normal_day, reference_day = dates[0], dates[1]
 state_for_generation = dict(final_state)
 state_for_generation["plan_status"] = "approved"  # simulate approval
 
-# Day without a reference-photo requirement — should generate fully
+# Day without a reference-photo requirement — generates fully, not a placeholder
 result_normal = generate_daily_asset(state_for_generation, normal_day)
 assert result_normal["asset_status"][normal_day] == "awaiting_approval", \
     f"Expected awaiting_approval, got {result_normal['asset_status']}"
-print(f"\n✅ {normal_day}: generated normally -> awaiting_approval")
+assert result_normal["generated_images"][normal_day]["is_placeholder"] is False, \
+    "Day with no reference-photo requirement should not be flagged as a placeholder"
+print(f"\n✅ {normal_day}: generated normally -> awaiting_approval, is_placeholder=False")
 
-# Day WITH a reference-photo requirement, none supplied yet — should be withheld
-result_pending = generate_daily_asset(state_for_generation, reference_day)
-assert result_pending["asset_status"][reference_day] == "pending_generation", \
-    f"Expected pending_generation, got {result_pending['asset_status']}"
-assert "generated_images" not in result_pending, "Should not have generated an image without the reference photo"
-print(f"✅ {reference_day}: correctly withheld pending a reference photo (caption still drafted)")
+# Day WITH a reference-photo requirement, none supplied yet — STILL generates an
+# image now (as a flagged placeholder), never leaves the day caption-only
+result_placeholder = generate_daily_asset(state_for_generation, reference_day)
+assert result_placeholder["asset_status"][reference_day] == "awaiting_approval", \
+    f"Expected awaiting_approval (placeholder image still generated), got {result_placeholder['asset_status']}"
+assert "generated_images" in result_placeholder and reference_day in result_placeholder["generated_images"], \
+    "Should have generated a placeholder image even without the reference photo"
+assert result_placeholder["generated_images"][reference_day]["is_placeholder"] is True, \
+    "Day needing a reference photo, with none supplied, should be flagged is_placeholder=True"
+print(f"✅ {reference_day}: generated placeholder image (is_placeholder=True) -> awaiting_approval, caption also drafted")
 
 print("\n✅ All checks passed.")
 

@@ -216,6 +216,7 @@ class CampaignManager:
         user_plan = current.get("user_plan") or "free"
         model = "gemini_free" if user_plan != "paid" else "stable_diffusion"
         result = generate_image(prompt=prompt, model_preference=model, reference_image=image_bytes)
+        result["is_placeholder"] = False
 
         images = dict(current.get("generated_images") or {})
         images[date] = result
