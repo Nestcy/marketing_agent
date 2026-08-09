@@ -31,11 +31,16 @@ image_clients.generate_image = mock_generate_image
 
 # ---- Monkeypatch llm_client so no real Groq calls happen ----
 import llm_client
+<<<<<<< HEAD
 from schemas import PlannerOutput, CalendarPlan, DayPlanEntry, DayContentOutput
+=======
+from schemas import PlannerOutput, CalendarPlan, DayPlan, DayContentOutput
+>>>>>>> 4b0816895dfa61dc15c9d672ff553381b4526119
 
 def mock_generate_structured(system_prompt, user_prompt, schema, **kwargs):
     if schema is PlannerOutput:
         today = datetime.date.today()
+<<<<<<< HEAD
         entries = []
         for i in range(3):  # small calendar for the test
             date = (today + datetime.timedelta(days=i)).isoformat()
@@ -46,6 +51,17 @@ def mock_generate_structured(system_prompt, user_prompt, schema, **kwargs):
                 needs_reference_photo=(i == 1),  # middle day needs a reference photo
             ))
         return PlannerOutput(calendar_plan=CalendarPlan(days=entries))
+=======
+        days = {}
+        for i in range(3):  # small calendar for the test
+            date = (today + datetime.timedelta(days=i)).isoformat()
+            days[date] = DayPlan(
+                idea=f"Test idea {i}",
+                platform="instagram",
+                needs_reference_photo=(i == 1),  # middle day needs a reference photo
+            )
+        return PlannerOutput(calendar_plan=CalendarPlan(days=days))
+>>>>>>> 4b0816895dfa61dc15c9d672ff553381b4526119
     if schema is DayContentOutput:
         return DayContentOutput(caption="Mock caption \u2728", image_prompt="Mock image prompt")
     raise ValueError(f"Unexpected schema in test: {schema}")
@@ -111,6 +127,7 @@ assert "generated_images" not in result_pending, "Should not have generated an i
 print(f"✅ {reference_day}: correctly withheld pending a reference photo (caption still drafted)")
 
 print("\n✅ All checks passed.")
+<<<<<<< HEAD
 
 print("\n" + "=" * 60)
 print("  TEST 3 — Multi-chunk planning (90 days, one chunk fails)")
@@ -159,3 +176,5 @@ print(f"\n✅ 90-day calendar has all 90 days despite chunk 2 failing outright (
 llm_client.generate_structured = mock_generate_structured  # restore for any later use
 
 print("\n✅ All checks passed.")
+=======
+>>>>>>> 4b0816895dfa61dc15c9d672ff553381b4526119
