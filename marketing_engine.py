@@ -1,301 +1,406 @@
+import datetime
 from typing import TypedDict, List, Dict, Any, Optional
 import operator
 from typing import Annotated
+
 from langgraph.graph import StateGraph, END
 
 # ---------------------------------------------------------
 # 1. STATE DEFINITION
 # ---------------------------------------------------------
+
 class MarketingState(TypedDict):
+    campaign_id: Optional[str]
+
     business_context: str
     campaign_goal: str
     target_audience: str
-    total_budget: float
-    
-    # Planners will populate this
-    campaign_plan: Optional[Dict[str, Any]]
-    budget_allocations: Optional[Dict[str, float]]
-    
-    # Generation outputs
-    generated_copy: Optional[Dict[str, str]]
-    generated_images: Optional[Dict[str, Dict[str, str]]] # e.g. {"ig_post_1": {"model": "dalle3", "url": "..."}}
-    generated_videos: Optional[Dict[str, Dict[str, str]]]
-    
-    # Final statuses
-    publishing_status: Optional[Dict[str, str]]
-    
-    # System logs
+    timeframe_days: int  # 30 or 90, business chooses
+
+    user_plan: Optional[str]  # "free" or "paid" — gates image model tier
+
+    business_website_url: Optional[str]
+    facebook_page_url: Optional[str]
+    website_context: Optional[str]
+    facebook_context: Optional[str]
+    research_notes: Optional[str]
+
+    # Plan-level gate
+    calendar_plan: Optional[Dict[str, Dict[str, Any]]]  # date -> {idea, platform, needs_reference_photo}
+    plan_status: Optional[str]  # "draft" | "approved"
+
+    # Per-day asset state (populated incrementally, one day at a time —
+    # NOT all generated up front)
+    generated_captions: Optional[Dict[str, str]]      # date -> caption
+    generated_images: Optional[Dict[str, Dict[str, str]]]  # date -> {model, local_path, url}
+    asset_status: Optional[Dict[str, str]]            # date -> "pending_generation" | "awaiting_approval" | "approved" | "published"
+    reference_images: Optional[Dict[str, str]]        # date -> "provided"
+
     logs: Annotated[List[str], operator.add]
 
-# ---------------------------------------------------------
-# 2. PLANNING NODES
-# ---------------------------------------------------------
-def replanning_evaluator_node(state: MarketingState):
-    """Evaluates if the current context requires a new plan."""
-    state['logs'].append("[Evaluator] Checking business context...")
-    # Mock logic: if no plan exists, we need one. 
-    needs_plan = True if not state.get('campaign_plan') else False
-    
-    return {"logs": [f"[Evaluator] Needs new plan: {needs_plan}"]}
-
-def master_planner_node(state: MarketingState):
-    """Generates the multi-week campaign strategy and budget distribution."""
-    state['logs'].append("[Planner] Generating comprehensive campaign strategy...")
-    
-    # Mock generation of a 4-week plan
-    mock_plan = {
-        "week_1": ["Brand Awareness Video", "Product Showcase Image"],
-        "week_2": ["Customer Testimonial Video", "Lifestyle Image"],
-        "week_3": ["UGC Style Avatar Video", "Promo Image"],
-        "week_4": ["Retargeting Video", "Urgency Image"]
-    }
-    
-    mock_budgets = {
-        "facebook_ads": state['total_budget'] * 0.5,
-        "tiktok_ads": state['total_budget'] * 0.3,
-        "google_ads": state['total_budget'] * 0.2
-    }
-    
-    return {
-        "campaign_plan": mock_plan,
-        "budget_allocations": mock_budgets,
-        "logs": ["[Planner] 4-week plan and budgets established."]
-    }
-
-def content_ideation_node(state: MarketingState):
-    """Generates the text copy and prompts for the media assets."""
-    state['logs'].append("[Ideation] Generating ad copy and media prompts...")
-    # Mock copy generation
-    mock_copy = {
-        "ig_post_1": "Discover our new collection! 🚀",
-        "tiktok_vid_1": "Watch how this changes everything. #wow"
-    }
-    return {"generated_copy": mock_copy, "logs": ["[Ideation] Copy generated."]}
 
 # ---------------------------------------------------------
-# 3. GENERATION ROUTING NODES
+# 2. CONTEXT GATHERING & RESEARCH NODES (optional, non-blocking)
 # ---------------------------------------------------------
 
-# Keywords that signal photorealistic / product imagery → Stable Diffusion
-_SD_KEYWORDS = {"product", "showcase", "lifestyle", "photorealistic", "fashion", "photo", "model"}
-# Everything else defaults to DALL-E 3 (creative, brand, abstract, promo)
+def business_context_gatherer_node(state: MarketingState):
+    from context_gatherer import fetch_website_context, fetch_facebook_context
 
-def _pick_image_model(asset_description: str) -> str:
-    """Heuristic: pick the best image model based on the content type."""
-    lower = asset_description.lower()
-    if any(kw in lower for kw in _SD_KEYWORDS):
-        return "stable_diffusion"
-    return "dalle3"
+    log_lines = ["[Context Gatherer] Checking for website/Facebook enrichment..."]
+    website_context = None
+    facebook_context = None
 
-def _build_image_prompt(asset_description: str, state: MarketingState) -> str:
-    """Build a rich prompt by combining the asset description with campaign context."""
-    return (
-        f"Create a professional marketing image for the following campaign.\n"
-        f"Business: {state['business_context']}\n"
-        f"Target Audience: {state['target_audience']}\n"
-        f"Asset Type: {asset_description}\n"
-        f"Style: High-end, modern, scroll-stopping social media ad.\n"
-        f"Do NOT include any text or watermarks in the image."
-    )
-
-def image_generation_router(state: MarketingState):
-    """
-    Intelligent image router that inspects the campaign plan,
-    picks DALL-E 3 or Stable Diffusion per asset, and generates images.
-    
-    Falls back to mock results if API keys are not set (dry-run mode).
-    """
-    from image_clients import generate_image  # local import to avoid circular deps
-
-    plan = state.get("campaign_plan", {})
-    images: Dict[str, Dict[str, str]] = {}
-    log_lines: List[str] = ["[Image Router] Routing image requests..."]
-
-    # Iterate over the plan and generate images for every "Image" asset
-    for week_key, assets in plan.items():
-        for asset_desc in assets:
-            if "image" not in asset_desc.lower():
-                continue  # skip non-image assets (videos handled elsewhere)
-
-            asset_id = f"{week_key}_{asset_desc.replace(' ', '_').lower()}"
-            model = _pick_image_model(asset_desc)
-            prompt = _build_image_prompt(asset_desc, state)
-
-            try:
-                result = generate_image(prompt=prompt, model_preference=model)
-                images[asset_id] = result
-                log_lines.append(
-                    f"  ✅ {asset_id} → {model} | "
-                    f"path={result.get('local_path', result.get('url', 'n/a'))}"
-                )
-            except Exception as e:
-                # Graceful fallback so the graph doesn't crash
-                images[asset_id] = {"model": model, "url": None, "error": str(e)}
-                log_lines.append(f"  ⚠️ {asset_id} → {model} FAILED: {e}")
-
-    log_lines.append(f"[Image Router] Finished. {len(images)} image(s) processed.")
-    return {"generated_images": images, "logs": log_lines}
-
-
-def _build_video_script(asset_description: str, state: MarketingState, is_avatar: bool) -> str:
-    """Build a script for avatar videos or a prompt for text-to-video models."""
-    if is_avatar:
-        return (
-            f"Hi there! I'm excited to share something amazing with you. "
-            f"{state.get('campaign_goal', '')} "
-            f"Our product is built for {state.get('target_audience', 'you')}. "
-            f"Don't miss out — check the link in our bio!"
+    website_url = state.get("business_website_url")
+    if website_url:
+        website_context = fetch_website_context(website_url)
+        log_lines.append(
+            f" \u2705 Website context pulled from {website_url}" if website_context
+            else f" \u26a0\ufe0f Could not pull website context from {website_url}"
         )
     else:
-        return (
-            f"Create a cinematic, high-quality marketing video clip.\n"
-            f"Business: {state['business_context']}\n"
-            f"Target Audience: {state['target_audience']}\n"
-            f"Asset Type: {asset_description}\n"
-            f"Style: Premium, modern, scroll-stopping. No text overlays."
+        log_lines.append(" - No website URL provided, skipping.")
+
+    facebook_url = state.get("facebook_page_url")
+    if facebook_url:
+        facebook_context = fetch_facebook_context(facebook_url)
+        log_lines.append(
+            f" \u2705 Facebook Page context pulled from {facebook_url}" if facebook_context
+            else f" \u26a0\ufe0f Could not pull Facebook context from {facebook_url}"
         )
+    else:
+        log_lines.append(" - No Facebook Page URL provided, skipping.")
 
-def video_generation_router(state: MarketingState):
-    """
-    Intelligent video router that inspects the campaign plan,
-    picks HeyGen/Synthesia/Runway/Luma per asset, and generates videos.
-    
-    Falls back gracefully if API keys are not set.
-    """
-    from video_clients import generate_video, pick_video_model
+    return {"website_context": website_context, "facebook_context": facebook_context, "logs": log_lines}
 
-    plan = state.get("campaign_plan", {})
-    videos: Dict[str, Dict[str, str]] = {}
-    log_lines: List[str] = ["[Video Router] Routing video requests..."]
 
-    # Iterate over the plan and generate videos for every "Video" asset
-    for week_key, assets in plan.items():
-        for asset_desc in assets:
-            if "video" not in asset_desc.lower():
-                continue  # skip non-video assets (images handled elsewhere)
+def business_research_node(state: MarketingState):
+    """Autonomous research via Tavily (search) + Firecrawl (scrape/search) — direct REST, no MCP."""
+    from research_clients import tavily_search, firecrawl_scrape, firecrawl_search
 
-            asset_id = f"{week_key}_{asset_desc.replace(' ', '_').lower()}"
-            model = pick_video_model(asset_desc)
-            is_avatar = model in ("heygen", "synthesia")
-            script_or_prompt = _build_video_script(asset_desc, state, is_avatar)
+    log_lines = ["[Research] Researching business via Tavily + Firecrawl..."]
+    business_summary = state.get("business_context", "")[:200]
 
-            try:
-                result = generate_video(
-                    script_or_prompt=script_or_prompt,
-                    model_preference=model,
-                )
-                videos[asset_id] = result
-                log_lines.append(
-                    f"  [OK] {asset_id} -> {model} | "
-                    f"id={result.get('video_id', result.get('task_id', result.get('generation_id', 'n/a')))}"
-                )
-            except Exception as e:
-                # Graceful fallback so the graph doesn't crash
-                videos[asset_id] = {"model": model, "video_url": None, "error": str(e)}
-                log_lines.append(f"  [WARN] {asset_id} -> {model} FAILED: {e}")
-
-    log_lines.append(f"[Video Router] Finished. {len(videos)} video(s) processed.")
-    return {"generated_videos": videos, "logs": log_lines}
-
-# ---------------------------------------------------------
-# 4. EXECUTION NODES
-# ---------------------------------------------------------
-def ad_platform_publisher(state: MarketingState):
-    """
-    Pushes the generated creatives and allocated budgets directly 
-    to Facebook Ads, TikTok Ads, and Google Ads APIs.
-    """
-    from publisher_clients import publish_to_all_platforms
-
-    log_lines = ["[Publisher] Pushing campaigns to Facebook, TikTok, Google..."]
-    campaign_name = f"Campaign - {state.get('campaign_goal', 'Growth')}"
-    budgets = state.get("budget_allocations", {})
-    images = state.get("generated_images", {})
-    videos = state.get("generated_videos", {})
-
-    status = publish_to_all_platforms(
-        campaign_name=campaign_name,
-        budget_allocations=budgets,
-        images=images,
-        videos=videos,
+    search_results = tavily_search(f"{business_summary} reviews competitors")
+    log_lines.append(
+        " \u2705 Tavily search results retrieved" if search_results
+        else " \u26a0\ufe0f Tavily unavailable or returned nothing (check TAVILY_API_KEY)"
     )
 
-    for platform, info in status.items():
-        st = info.get("status", "PAUSED")
-        b = info.get("budget_allocated_usd", 0.0)
-        log_lines.append(f"  ✅ [{platform.upper()}] Status: {st} | Budget: ${b:.2f}")
+    website_url = state.get("business_website_url")
+    if website_url:
+        crawled = firecrawl_scrape(website_url)
+        log_lines.append(
+            f" \u2705 Firecrawl scraped {website_url}" if crawled
+            else f" \u26a0\ufe0f Firecrawl could not scrape {website_url}"
+        )
+    else:
+        crawled = firecrawl_search(business_summary)
+        log_lines.append(
+            " \u2705 Firecrawl search results retrieved" if crawled
+            else " \u26a0\ufe0f Firecrawl search unavailable or returned nothing"
+        )
 
-    log_lines.append("[Publisher] Campaigns and budgets deployed.")
-    return {"publishing_status": status, "logs": log_lines}
+    research_notes = "\n\n".join(p for p in [search_results, crawled] if p) or None
+    return {"research_notes": research_notes, "logs": log_lines}
+
+
+def _full_business_context(state: MarketingState) -> str:
+    parts = [state.get("business_context", "")]
+    if state.get("website_context"):
+        parts.append(f"[From business website]\n{state['website_context']}")
+    if state.get("facebook_context"):
+        parts.append(f"[From Facebook Page]\n{state['facebook_context']}")
+    if state.get("research_notes"):
+        parts.append(f"[From web research]\n{state['research_notes']}")
+    return "\n\n".join(p for p in parts if p)
+
 
 # ---------------------------------------------------------
-# 5. GRAPH DEFINITION & ROUTING LOGIC
+# 3. PLANNER — produces the full day-by-day calendar, then STOPS
+#    for owner approval. Does not generate any images/captions yet.
 # ---------------------------------------------------------
-def should_plan(state: MarketingState):
-    """Conditional edge logic: route to planner if needed, else skip to ideation."""
-    if not state.get('campaign_plan'):
-        return "master_planner_node"
-    return "content_ideation_node"
+
+_PLANNER_SYSTEM_PROMPT = """You are a senior organic social media strategist.
+Given a business, a campaign goal, a target audience, and a timeframe in
+days, produce a day-by-day content calendar — one post idea per day.
+
+Respond ONLY with the structured output requested: a LIST of day
+entries, one per date, each with its own date field set to the exact
+date string it corresponds to. For each entry:
+- date: the exact date string this entry is for (from the list of dates given below)
+- idea: a short, specific content concept (not generic filler)
+- platform: which single platform this post is best suited for
+  (instagram, facebook, or tiktok)
+- needs_reference_photo: true if the idea requires a REAL photo the
+  business would need to supply (an actual product shot, a founder's
+  photo, real store/team imagery) rather than a purely AI-imagined
+  scene; false if it can be fully AI-generated.
+
+Vary content types across the calendar — product highlights, behind
+the scenes, testimonials, educational/tips content, promotions,
+community/engagement posts — don't repeat the same idea pattern every
+day. Ground ideas in the business's real context, tone, and any
+research notes provided. If a "Learned preferences" section is given,
+follow every point in it.
+"""
+
+
+_CALENDAR_CHUNK_SIZE = 20  # days per LLM call — keeps each tool-call response small/reliable
+                            # rather than risking one giant 90-entry call
+
+
+def _fallback_pattern_for_dates(dates: List[str]) -> Dict[str, Dict[str, Any]]:
+    pattern = [
+        {"idea": "Product highlight post", "platform": "instagram", "needs_reference_photo": True},
+        {"idea": "Behind the scenes look", "platform": "instagram", "needs_reference_photo": True},
+        {"idea": "Customer testimonial graphic", "platform": "facebook", "needs_reference_photo": False},
+        {"idea": "Quick tip / educational post", "platform": "tiktok", "needs_reference_photo": False},
+    ]
+    return {date: pattern[i % len(pattern)] for i, date in enumerate(dates)}
+
+
+def master_planner_node(state: MarketingState):
+    """
+    Generates the full timeframe_days calendar in CHUNKS of
+    _CALENDAR_CHUNK_SIZE days per LLM call, rather than one call for
+    the whole timeframe — a single 90-entry tool call risked hitting
+    Groq's tool_use_failed error even with the list-based schema, since
+    the response itself gets large. Each chunk's prompt includes a
+    short summary of ideas already used in earlier chunks so the
+    calendar doesn't repeat itself across chunk boundaries. If one
+    chunk's LLM call fails, only THAT chunk falls back to the mock
+    pattern — a failure in days 41-60 doesn't discard days 1-40 that
+    already generated successfully.
+
+    Always sets plan_status='draft' — approval is a separate, explicit
+    step outside this graph.
+    """
+    import campaign_preferences
+
+    state["logs"].append("[Planner] Generating day-by-day content calendar...")
+
+    campaign_id = state.get("campaign_id", "")
+    prefs_text = campaign_preferences.get_preferences_text(campaign_id) if campaign_id else ""
+
+    timeframe_days = state.get("timeframe_days", 30)
+    start_date = datetime.date.today()
+    all_dates = [(start_date + datetime.timedelta(days=i)).isoformat() for i in range(timeframe_days)]
+
+    chunks = [all_dates[i:i + _CALENDAR_CHUNK_SIZE] for i in range(0, len(all_dates), _CALENDAR_CHUNK_SIZE)]
+
+    calendar: Dict[str, Dict[str, Any]] = {}
+    ideas_so_far: List[str] = []
+    log_lines: List[str] = []
+
+    from llm_client import generate_structured
+    from schemas import PlannerOutput
+
+    for chunk_index, chunk_dates in enumerate(chunks):
+        continuity_note = (
+            f"Ideas already used earlier in this calendar (avoid repeating these): {ideas_so_far}\n"
+            if ideas_so_far else ""
+        )
+        user_prompt = (
+            f"Business: {_full_business_context(state)}\n"
+            f"Campaign goal: {state['campaign_goal']}\n"
+            f"Target audience: {state['target_audience']}\n"
+            f"This is chunk {chunk_index + 1} of {len(chunks)} of a {timeframe_days}-day calendar.\n"
+            f"Dates to plan in THIS chunk (use these exact date strings): {chunk_dates}\n"
+            f"{continuity_note}"
+            f"{prefs_text}"
+        )
+
+        try:
+            result: PlannerOutput = generate_structured(_PLANNER_SYSTEM_PROMPT, user_prompt, PlannerOutput)
+            for entry in result.calendar_plan.days:
+                if entry.date not in chunk_dates:
+                    continue  # ignore any stray/hallucinated date outside this chunk
+                calendar[entry.date] = {
+                    "idea": entry.idea,
+                    "platform": entry.platform,
+                    "needs_reference_photo": entry.needs_reference_photo,
+                }
+                ideas_so_far.append(entry.idea)
+
+            missing = [d for d in chunk_dates if d not in calendar]
+            if missing:
+                calendar.update(_fallback_pattern_for_dates(missing))
+                log_lines.append(
+                    f" \u26a0\ufe0f Chunk {chunk_index + 1}/{len(chunks)}: {len(missing)} date(s) missing from response, filled with fallback pattern."
+                )
+            else:
+                log_lines.append(f" \u2705 Chunk {chunk_index + 1}/{len(chunks)}: {len(chunk_dates)} days generated.")
+        except Exception as e:
+            calendar.update(_fallback_pattern_for_dates(chunk_dates))
+            log_lines.append(f" \u26a0\ufe0f Chunk {chunk_index + 1}/{len(chunks)} LLM call failed ({e}); used fallback pattern for these {len(chunk_dates)} days.")
+
+    log_lines.append(f"[Planner] Finished. {len(calendar)}-day calendar built across {len(chunks)} chunk(s) (awaiting approval).")
+    return {"calendar_plan": calendar, "plan_status": "draft", "logs": log_lines}
+
+
+def _add_planning_nodes_and_edges(workflow: StateGraph) -> None:
+    """
+    This graph ONLY produces the draft calendar and stops — it does not
+    generate any daily assets or publish anything. Daily generation
+    happens later, per-day, via generate_daily_asset() below, triggered
+    either by the daily Celery cron or on-demand through the API/chat.
+    """
+    workflow.add_node("context_gatherer", business_context_gatherer_node)
+    workflow.add_node("business_research_node", business_research_node)
+    workflow.add_node("master_planner_node", master_planner_node)
+
+    workflow.set_entry_point("context_gatherer")
+    workflow.add_edge("context_gatherer", "business_research_node")
+    workflow.add_edge("business_research_node", "master_planner_node")
+    workflow.add_edge("master_planner_node", END)
+
 
 def build_graph():
     workflow = StateGraph(MarketingState)
-
-    # Add Nodes
-    workflow.add_node("evaluator", replanning_evaluator_node)
-    workflow.add_node("master_planner_node", master_planner_node)
-    workflow.add_node("content_ideation_node", content_ideation_node)
-    workflow.add_node("image_generation_router", image_generation_router)
-    workflow.add_node("video_generation_router", video_generation_router)
-    workflow.add_node("ad_platform_publisher", ad_platform_publisher)
-
-    # Add Edges
-    workflow.set_entry_point("evaluator")
-    
-    # Conditional logic after evaluator
-    workflow.add_conditional_edges(
-        "evaluator",
-        should_plan,
-        {
-            "master_planner_node": "master_planner_node",
-            "content_ideation_node": "content_ideation_node"
-        }
-    )
-    
-    # Flow from planner to ideation
-    workflow.add_edge("master_planner_node", "content_ideation_node")
-    
-    # After ideation, we can generate images and videos in parallel
-    workflow.add_edge("content_ideation_node", "image_generation_router")
-    workflow.add_edge("content_ideation_node", "video_generation_router")
-    
-    # Both image and video gen need to finish before publishing
-    workflow.add_edge("image_generation_router", "ad_platform_publisher")
-    workflow.add_edge("video_generation_router", "ad_platform_publisher")
-    
-    workflow.add_edge("ad_platform_publisher", END)
-
+    _add_planning_nodes_and_edges(workflow)
     return workflow.compile()
 
+
+def build_graph_with_checkpointer(checkpointer):
+    workflow = StateGraph(MarketingState)
+    _add_planning_nodes_and_edges(workflow)
+    return workflow.compile(checkpointer=checkpointer)
+
+
+def build_replan_graph_with_checkpointer(checkpointer):
+    """
+    Used for plan-level 'refine': re-runs ONLY the planner node (context/
+    research already happened once and don't need repeating), reading
+    the newly-added preference from campaign_preferences and producing
+    a fresh calendar_plan, still in 'draft' status.
+    """
+    workflow = StateGraph(MarketingState)
+    workflow.add_node("master_planner_node", master_planner_node)
+    workflow.set_entry_point("master_planner_node")
+    workflow.add_edge("master_planner_node", END)
+    return workflow.compile(checkpointer=checkpointer)
+
+
 # ---------------------------------------------------------
-# 6. MOCK EXECUTION (For testing)
+# 4. DAILY ASSET GENERATION — standalone, called once per day per
+#    campaign (by tasks.py's cron, or on-demand via the API/chat),
+#    NOT a chained graph node. Stops at "awaiting_approval" — the ad
+#    is finished and ready for the business to review. This platform
+#    doesn't publish/crosspost anywhere (a separate future feature) —
+#    "approved" is a terminal state meaning "ready for the business
+#    to use," not "posted."
 # ---------------------------------------------------------
+
+_DAY_CONTENT_SYSTEM_PROMPT = """You are a social media copywriter and
+creative director. Given a business, its target audience, and today's
+planned content idea/platform, write:
+- caption: the actual post caption (under 280 characters, platform-
+  appropriate tone, no hashtag spam)
+- image_prompt: a detailed visual description for an image generator
+  to create the accompanying image
+
+If a "Learned preferences" section is given, follow every point in it —
+these are standing instructions from the business owner accumulated
+over the life of this campaign.
+"""
+
+
+def generate_daily_asset(state: Dict[str, Any], date: str) -> Dict[str, Any]:
+    """
+    Generates ONE day's caption + image, for the given date, using that
+    day's entry in calendar_plan. Returns a dict with the same shape as
+    a partial MarketingState update — caller (CampaignManager) merges
+    this into persisted state.
+
+    If the day's idea needs a reference photo and none has been
+    supplied yet (state["reference_images"].get(date)), image
+    generation is skipped and asset_status is left as
+    "pending_generation" rather than "awaiting_approval" — the caller
+    should notify the business rather than presenting an incomplete
+    draft for review.
+    """
+    import campaign_preferences
+    from llm_client import generate_structured
+    from schemas import DayContentOutput
+    from image_clients import generate_image
+
+    campaign_id = state.get("campaign_id", "")
+    calendar_plan = state.get("calendar_plan", {})
+    day_plan = calendar_plan.get(date)
+    if day_plan is None:
+        raise ValueError(f"No calendar entry for date={date!r}")
+
+    prefs_text = campaign_preferences.get_preferences_text(campaign_id) if campaign_id else ""
+    business_context = state.get("business_context", "")
+    target_audience = state.get("target_audience", "")
+
+    user_prompt = (
+        f"Business: {business_context}\n"
+        f"Target audience: {target_audience}\n"
+        f"Today's idea: {day_plan['idea']}\n"
+        f"Platform: {day_plan['platform']}\n"
+        f"{prefs_text}"
+    )
+
+    try:
+        content: DayContentOutput = generate_structured(_DAY_CONTENT_SYSTEM_PROMPT, user_prompt, DayContentOutput)
+        caption = content.caption
+        image_prompt = content.image_prompt
+    except Exception:
+        caption = f"{day_plan['idea']} \u2728"
+        image_prompt = f"Professional social media image: {day_plan['idea']}, for {business_context}"
+
+    reference_images = state.get("reference_images") or {}
+    needs_reference = day_plan.get("needs_reference_photo", False)
+
+    if needs_reference and date not in reference_images:
+        return {
+            "generated_captions": {date: caption},
+            "asset_status": {date: "pending_generation"},
+        }
+
+    user_plan = state.get("user_plan") or "free"
+    model = "gemini_free" if user_plan != "paid" else "dalle3"
+    try:
+        image_result = generate_image(prompt=image_prompt, model_preference=model)
+        image_ok = True
+    except Exception as e:
+        image_result = {"model": model, "url": None, "error": str(e)}
+        image_ok = False
+
+    return {
+        "generated_captions": {date: caption},
+        "generated_images": {date: image_result},
+        "asset_status": {date: "awaiting_approval" if image_ok else "pending_generation"},
+    }
+
+
+# ---------------------------------------------------------
+# 5. MOCK EXECUTION (For testing the planning graph)
+# ---------------------------------------------------------
+
 if __name__ == "__main__":
     app = build_graph()
-    
+
     initial_state = {
-        "business_context": "We are a SaaS startup launching a new AI tool. We need aggressive growth.",
-        "campaign_goal": "Acquire 1000 new signups this month.",
-        "target_audience": "Tech founders, marketers, and developers.",
-        "total_budget": 5000.0,
-        "logs": []
+        "campaign_id": "demo-1",
+        "business_context": "A neighborhood coffee shop known for single-origin pour-overs.",
+        "campaign_goal": "Increase foot traffic and build a loyal local following.",
+        "target_audience": "Young professionals and students nearby.",
+        "timeframe_days": 30,
+        "user_plan": "free",
+        "business_website_url": None,
+        "facebook_page_url": None,
+        "reference_images": {},
+        "logs": [],
     }
-    
-    print("--- STARTING WORKFLOW ---")
+
+    print("--- STARTING PLANNING WORKFLOW ---")
     for output in app.stream(initial_state):
         for key, value in output.items():
             print(f"Node: {key}")
             if "logs" in value:
                 print(value["logs"][-1])
             print("---")
-    
-    print("\\nWorkflow Complete!")
+
+    print("\nPlanning complete! Calendar is in 'draft' status, awaiting owner approval.")

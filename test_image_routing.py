@@ -1,82 +1,161 @@
 """
-Test script that validates the image routing logic works correctly.
-Runs without real API keys by monkeypatching the generate_image function.
+Smoke test for the v3 architecture: the planning graph (research ->
+calendar draft) and the standalone daily asset generator. Runs without
+real API keys by monkeypatching image_clients, research_clients, and
+llm_client.
 """
 import sys
 import io
-
-# Fix Windows console encoding for unicode/emoji output
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 import os
+import datetime
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.path.insert(0, os.path.dirname(__file__))
 
-# Monkeypatch: replace real API calls with mock responses
+# ---- Monkeypatch research (no real network) ----
+import research_clients
+research_clients.tavily_search = lambda *a, **kw: None
+research_clients.firecrawl_scrape = lambda *a, **kw: None
+research_clients.firecrawl_search = lambda *a, **kw: None
+
+# ---- Monkeypatch image client ----
 import image_clients
+_image_call_log = []
 
-_call_log = []
-
-def mock_generate_image(prompt: str, model_preference: str = "dalle3", **kwargs):
-    """Records the call and returns a fake result."""
-    result = {
-        "model": model_preference,
-        "url": f"https://mock.test/{model_preference}_{len(_call_log)}.png",
-        "local_path": f"/tmp/mock_{model_preference}_{len(_call_log)}.png",
-        "prompt_snippet": prompt[:80],
-    }
-    _call_log.append(result)
+def mock_generate_image(prompt: str, model_preference: str = "gemini_free", **kwargs):
+    result = {"model": model_preference, "url": None, "local_path": f"/tmp/mock_{len(_image_call_log)}.png"}
+    _image_call_log.append(result)
     return result
 
-image_clients.generate_image = mock_generate_image  # patch
+image_clients.generate_image = mock_generate_image
 
-# Now import and run the engine
-from marketing_engine import build_graph
+# ---- Monkeypatch llm_client so no real Groq calls happen ----
+import llm_client
+from schemas import PlannerOutput, CalendarPlan, DayPlanEntry, DayContentOutput
+
+def mock_generate_structured(system_prompt, user_prompt, schema, **kwargs):
+    if schema is PlannerOutput:
+        today = datetime.date.today()
+        entries = []
+        for i in range(3):  # small calendar for the test
+            date = (today + datetime.timedelta(days=i)).isoformat()
+            entries.append(DayPlanEntry(
+                date=date,
+                idea=f"Test idea {i}",
+                platform="instagram",
+                needs_reference_photo=(i == 1),  # middle day needs a reference photo
+            ))
+        return PlannerOutput(calendar_plan=CalendarPlan(days=entries))
+    if schema is DayContentOutput:
+        return DayContentOutput(caption="Mock caption \u2728", image_prompt="Mock image prompt")
+    raise ValueError(f"Unexpected schema in test: {schema}")
+
+llm_client.generate_structured = mock_generate_structured
+
+# ---- Monkeypatch campaign_preferences (no real Postgres in this test) ----
+import campaign_preferences
+campaign_preferences.get_preferences_text = lambda campaign_id: ""
+
+from marketing_engine import build_graph, generate_daily_asset
+
+print("=" * 60)
+print("  TEST 1 — Planning graph produces a day-keyed calendar")
+print("=" * 60)
 
 app = build_graph()
-
 initial_state = {
-    "business_context": "Luxury fashion brand launching a summer collection.",
-    "campaign_goal": "Drive 500 online purchases this month.",
-    "target_audience": "Women aged 25-40, fashion-conscious, urban.",
-    "total_budget": 8000.0,
+    "campaign_id": "test-campaign",
+    "business_context": "A neighborhood coffee shop.",
+    "campaign_goal": "Increase foot traffic.",
+    "target_audience": "Local young professionals.",
+    "timeframe_days": 3,
+    "user_plan": "free",
+    "reference_images": {},
     "logs": [],
 }
 
-print("=" * 60)
-print("  IMAGE ROUTING TEST (mock API calls)")
-print("=" * 60)
-
+final_state = {}
 for output in app.stream(initial_state):
     for node_name, value in output.items():
+        final_state.update(value)
         print(f"\n--- Node: {node_name} ---")
-        if "logs" in value:
-            for log in value["logs"]:
-                print(f"  {log}")
-        if "generated_images" in value:
-            print("\n  📸 Generated Images:")
-            for asset_id, info in value["generated_images"].items():
-                print(f"    {asset_id}:")
-                print(f"      Model: {info['model']}")
-                print(f"      URL:   {info.get('url', 'N/A')}")
+        for log in value.get("logs", []):
+            print(f"  {log}")
+
+calendar = final_state.get("calendar_plan", {})
+assert len(calendar) == 3, f"Expected 3 days in calendar, got {len(calendar)}"
+assert final_state.get("plan_status") == "draft", "Plan should be in draft status, not auto-approved"
+print(f"\n✅ Calendar has {len(calendar)} days, plan_status='draft' (awaiting approval, as expected)")
 
 print("\n" + "=" * 60)
-print(f"  TOTAL API CALLS MADE: {len(_call_log)}")
+print("  TEST 2 — Daily asset generation (per-day, standalone)")
 print("=" * 60)
 
-# Validate routing logic
-print("\n🔍 Routing Validation:")
-for call in _call_log:
-    model = call["model"]
-    snippet = call["prompt_snippet"]
-    print(f"  [{model:>20s}] ← {snippet}...")
+dates = sorted(calendar.keys())
+normal_day, reference_day = dates[0], dates[1]
 
-# Check that product/lifestyle went to SD, and promo/urgency went to DALL-E
-sd_calls = [c for c in _call_log if "stable" in c["model"]]
-dalle_calls = [c for c in _call_log if "dalle" in c["model"]]
-print(f"\n  DALL-E 3 calls:         {len(dalle_calls)}")
-print(f"  Stable Diffusion calls: {len(sd_calls)}")
+state_for_generation = dict(final_state)
+state_for_generation["plan_status"] = "approved"  # simulate approval
 
-if len(_call_log) == 4:
-    print("\n✅ All 4 image assets from the campaign plan were processed!")
-else:
-    print(f"\n⚠️ Expected 4 image assets but got {len(_call_log)}")
+# Day without a reference-photo requirement — should generate fully
+result_normal = generate_daily_asset(state_for_generation, normal_day)
+assert result_normal["asset_status"][normal_day] == "awaiting_approval", \
+    f"Expected awaiting_approval, got {result_normal['asset_status']}"
+print(f"\n✅ {normal_day}: generated normally -> awaiting_approval")
+
+# Day WITH a reference-photo requirement, none supplied yet — should be withheld
+result_pending = generate_daily_asset(state_for_generation, reference_day)
+assert result_pending["asset_status"][reference_day] == "pending_generation", \
+    f"Expected pending_generation, got {result_pending['asset_status']}"
+assert "generated_images" not in result_pending, "Should not have generated an image without the reference photo"
+print(f"✅ {reference_day}: correctly withheld pending a reference photo (caption still drafted)")
+
+print("\n✅ All checks passed.")
+
+print("\n" + "=" * 60)
+print("  TEST 3 — Multi-chunk planning (90 days, one chunk fails)")
+print("=" * 60)
+
+from marketing_engine import _CALENDAR_CHUNK_SIZE
+
+call_count = {"n": 0}
+
+def mock_generate_structured_chunked(system_prompt, user_prompt, schema, **kwargs):
+    if schema is not PlannerOutput:
+        return mock_generate_structured(system_prompt, user_prompt, schema, **kwargs)
+
+    call_count["n"] += 1
+    # Simulate the 2nd chunk failing outright, like a real tool_use_failed error
+    if call_count["n"] == 2:
+        raise RuntimeError("simulated tool_use_failed")
+
+    # Pull the chunk's dates back out of the prompt (crude but fine for a test)
+    import re
+    dates_in_prompt = re.findall(r"\d{4}-\d{2}-\d{2}", user_prompt)
+    entries = [
+        DayPlanEntry(date=d, idea=f"Idea for {d}", platform="instagram", needs_reference_photo=False)
+        for d in dates_in_prompt
+    ]
+    return PlannerOutput(calendar_plan=CalendarPlan(days=entries))
+
+llm_client.generate_structured = mock_generate_structured_chunked
+
+state_90 = dict(initial_state)
+state_90["timeframe_days"] = 90
+final_state_90 = {}
+for output in app.stream(state_90):
+    for node_name, value in output.items():
+        final_state_90.update(value)
+        if node_name == "master_planner_node":
+            for log in value.get("logs", []):
+                print(f"  {log}")
+
+calendar_90 = final_state_90.get("calendar_plan", {})
+expected_chunks = -(-90 // _CALENDAR_CHUNK_SIZE)  # ceil division
+assert len(calendar_90) == 90, f"Expected 90 days total (chunk failure should still fall back, not drop days), got {len(calendar_90)}"
+assert call_count["n"] == expected_chunks, f"Expected {expected_chunks} chunk calls, got {call_count['n']}"
+print(f"\n✅ 90-day calendar has all 90 days despite chunk 2 failing outright ({expected_chunks} chunk calls made, chunk 2 fell back correctly)")
+
+llm_client.generate_structured = mock_generate_structured  # restore for any later use
+
+print("\n✅ All checks passed.")

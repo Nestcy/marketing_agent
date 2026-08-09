@@ -1,25 +1,28 @@
 # ---------------------------------------------------------
 # Configuration & API Key Management
 # ---------------------------------------------------------
-# Load API keys from environment variables. 
-# Never hardcode keys in source files.
+# Load API keys from environment variables. Never hardcode keys.
 #
-# Usage:
-#   Set these before running:
-#     export OPENAI_API_KEY="sk-..."
-#     export STABILITY_API_KEY="sk-..."
-#     export GROQ_API_KEY="gsk_..."
-#     export HEYGEN_API_KEY="..."
-#     export RUNWAY_API_KEY="..."
-#     export LUMA_API_KEY="..."
-#     export FACEBOOK_ACCESS_TOKEN="..."
-#     export TIKTOK_ACCESS_TOKEN="..."
-#     export GOOGLE_ADS_DEVELOPER_TOKEN="..."
+# export GOOGLE_API_KEY="..."            # free-tier image gen (required)
+# export GENAI_MODEL="..."               # optional, defaults below
+# export IMAGE_QUALITY="high"            # optional
+# export OPENAI_API_KEY="sk-..."         # optional, paid-tier image gen
+# export STABILITY_API_KEY="sk-..."      # optional, paid-tier image gen
+# export GROQ_API_KEY="gsk_..."
+# export GROQ_MODEL="...."
+# export TAVILY_API_KEY="tvly-..."       # business research (search)
+# export FIRECRAWL_API_KEY="..."         # business research (scrape)
+# export FACEBOOK_ACCESS_TOKEN="..."     # organic posting
+# export TIKTOK_ACCESS_TOKEN="..."
+# export INSTAGRAM_ACCESS_TOKEN="..."
+# export POSTGRES_CONN_STRING="postgresql://user:password@host:5432/dbname?sslmode=require"
+# export REDIS_URL="redis://..."         # Celery broker/backend, for daily cron
 # ---------------------------------------------------------
+
 import os
 
+
 def get_key(name: str, required: bool = True) -> str:
-    """Retrieve an API key from environment variables."""
     val = os.environ.get(name, "")
     if required and not val:
         raise EnvironmentError(
@@ -28,43 +31,50 @@ def get_key(name: str, required: bool = True) -> str:
         )
     return val
 
-# Lazy accessors — only fail when actually called
+
+def google_api_key() -> str:
+    return get_key("GOOGLE_API_KEY")
+
+
+def genai_model() -> str:
+    return os.environ.get("GENAI_MODEL", "gemini-2.5-flash-image")
+
+
+def image_quality() -> str:
+    return os.environ.get("IMAGE_QUALITY", "standard")
+
+
 def openai_api_key() -> str:
     return get_key("OPENAI_API_KEY")
+
 
 def stability_api_key() -> str:
     return get_key("STABILITY_API_KEY")
 
+
 def groq_api_key() -> str:
     return get_key("GROQ_API_KEY")
 
-def heygen_api_key() -> str:
-    return get_key("HEYGEN_API_KEY")
 
-def runway_api_key() -> str:
-    return get_key("RUNWAY_API_KEY")
+def groq_model() -> str:
+    return os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
-def luma_api_key() -> str:
-    return get_key("LUMA_API_KEY")
 
-def facebook_access_token() -> str:
-    return get_key("FACEBOOK_ACCESS_TOKEN")
+def tavily_api_key() -> str:
+    return get_key("TAVILY_API_KEY")
 
-def facebook_ad_account_id() -> str:
-    return get_key("FACEBOOK_AD_ACCOUNT_ID")
 
-def tiktok_access_token() -> str:
-    return get_key("TIKTOK_ACCESS_TOKEN")
+def firecrawl_api_key() -> str:
+    return get_key("FIRECRAWL_API_KEY")
 
-def tiktok_advertiser_id() -> str:
-    return get_key("TIKTOK_ADVERTISER_ID")
 
-def google_ads_developer_token() -> str:
-    return get_key("GOOGLE_ADS_DEVELOPER_TOKEN")
+def postgres_conn_string() -> str:
+    return get_key("POSTGRES_CONN_STRING")
 
-def google_ads_customer_id() -> str:
-    return get_key("GOOGLE_ADS_CUSTOMER_ID")
 
-# Output directory for generated assets
+def redis_url() -> str:
+    return get_key("REDIS_URL")
+
+
 ASSETS_DIR = os.path.join(os.path.dirname(__file__), "generated_assets")
 os.makedirs(ASSETS_DIR, exist_ok=True)
