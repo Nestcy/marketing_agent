@@ -19,6 +19,15 @@ class MarketingState(TypedDict):
 
     user_plan: Optional[str]  # "free" or "paid" — gates image model tier
 
+    # How many days ahead the daily cron should try to keep generated
+    # and waiting for review, beyond just today. Default 1 (today only).
+    # Business can raise this (e.g. 3) to always have a few days' worth
+    # of drafts ready to review at once, without waiting one-per-day.
+    # Independent of this, generate_days_ahead() lets a business trigger
+    # a batch on demand at any time — this setting only affects what the
+    # unattended cron does by itself.
+    auto_generate_buffer_days: Optional[int]
+
     business_website_url: Optional[str]
     facebook_page_url: Optional[str]
     website_context: Optional[str]
@@ -26,8 +35,16 @@ class MarketingState(TypedDict):
     research_notes: Optional[str]
 
     # Plan-level gate
-    calendar_plan: Optional[Dict[str, Dict[str, Any]]]  # date -> {idea, platform, needs_reference_photo}
+    # Plan-level gate — a LIGHTWEIGHT strategy outline (content
+    # pillars, tone, platform mix), not a full day-by-day calendar.
+    # One small LLM call regardless of timeframe_days.
+    strategy_outline: Optional[Dict[str, Any]]  # {content_pillars, tone, platform_mix, notes}
+    calendar_dates: Optional[List[str]]  # plain list of ISO dates for the timeframe, computed in Python (no LLM)
     plan_status: Optional[str]  # "draft" | "approved"
+
+    # Populated INCREMENTALLY, one day at a time, only as each day is
+    # actually generated (not upfront) — date -> {idea, platform, needs_reference_photo}
+    calendar_plan: Optional[Dict[str, Dict[str, Any]]]
 
     # Per-day asset state (populated incrementally, one day at a time —
     # NOT all generated up front)
@@ -116,126 +133,88 @@ def _full_business_context(state: MarketingState) -> str:
 
 
 # ---------------------------------------------------------
-# 3. PLANNER — produces the full day-by-day calendar, then STOPS
-#    for owner approval. Does not generate any images/captions yet.
+# 3. PLANNER — produces a LIGHTWEIGHT strategy outline (content
+#    pillars, tone, platform mix), NOT a day-by-day calendar. This is
+#    one small LLM call regardless of whether timeframe_days is 30 or
+#    90 — the per-day specifics get decided later, one day at a time,
+#    only when that day is actually about to be generated (see
+#    generate_daily_asset below). This is what keeps token usage low:
+#    no more paying to plan 90 days of content upfront before a single
+#    post has even been reviewed.
 # ---------------------------------------------------------
 
 _PLANNER_SYSTEM_PROMPT = """You are a senior organic social media strategist.
-Given a business, a campaign goal, a target audience, and a timeframe in
-days, produce a day-by-day content calendar — one post idea per day.
+Given a business, a campaign goal, a target audience, and a timeframe,
+produce a SHORT strategic outline — not a day-by-day calendar, just the
+recurring structure that will guide day-by-day content decisions later.
 
-Respond ONLY with the structured output requested: a LIST of day
-entries, one per date, each with its own date field set to the exact
-date string it corresponds to. For each entry:
-- date: the exact date string this entry is for (from the list of dates given below)
-- idea: a short, specific content concept (not generic filler)
-- platform: which single platform this post is best suited for
-  (instagram, facebook, or tiktok)
-- needs_reference_photo: true if the idea requires a REAL photo the
-  business would need to supply (an actual product shot, a founder's
-  photo, real store/team imagery) rather than a purely AI-imagined
-  scene; false if it can be fully AI-generated.
+Respond ONLY with the structured output requested:
+- content_pillars: 3-6 recurring themes to rotate through (e.g. product
+  highlights, behind the scenes, testimonials, educational tips,
+  promotions, community engagement) — specific to this business, not generic
+- tone: the brand voice captions should use
+- platform_mix: which platforms to prioritize and roughly how often
+- notes: any other short strategic guidance (optional)
 
-Vary content types across the calendar — product highlights, behind
-the scenes, testimonials, educational/tips content, promotions,
-community/engagement posts — don't repeat the same idea pattern every
-day. Ground ideas in the business's real context, tone, and any
-research notes provided. If a "Learned preferences" section is given,
-follow every point in it.
+Ground this in the business's real context and any research notes
+provided. If a "Learned preferences" section is given, follow it.
 """
-
-
-_CALENDAR_CHUNK_SIZE = 20  # days per LLM call — keeps each tool-call response small/reliable
-                            # rather than risking one giant 90-entry call
-
-
-def _fallback_pattern_for_dates(dates: List[str]) -> Dict[str, Dict[str, Any]]:
-    pattern = [
-        {"idea": "Product highlight post", "platform": "instagram", "needs_reference_photo": True},
-        {"idea": "Behind the scenes look", "platform": "instagram", "needs_reference_photo": True},
-        {"idea": "Customer testimonial graphic", "platform": "facebook", "needs_reference_photo": False},
-        {"idea": "Quick tip / educational post", "platform": "tiktok", "needs_reference_photo": False},
-    ]
-    return {date: pattern[i % len(pattern)] for i, date in enumerate(dates)}
 
 
 def master_planner_node(state: MarketingState):
     """
-    Generates the full timeframe_days calendar in CHUNKS of
-    _CALENDAR_CHUNK_SIZE days per LLM call, rather than one call for
-    the whole timeframe — a single 90-entry tool call risked hitting
-    Groq's tool_use_failed error even with the list-based schema, since
-    the response itself gets large. Each chunk's prompt includes a
-    short summary of ideas already used in earlier chunks so the
-    calendar doesn't repeat itself across chunk boundaries. If one
-    chunk's LLM call fails, only THAT chunk falls back to the mock
-    pattern — a failure in days 41-60 doesn't discard days 1-40 that
-    already generated successfully.
-
-    Always sets plan_status='draft' — approval is a separate, explicit
-    step outside this graph.
+    Generates the lightweight strategy outline in ONE LLM call. Always
+    sets plan_status='draft' — approval is a separate, explicit step
+    outside this graph. calendar_dates (the plain list of ISO dates for
+    the timeframe) is computed here in Python, no LLM call needed for
+    that part — it's just today + timeframe_days.
     """
     import campaign_preferences
 
-    state["logs"].append("[Planner] Generating day-by-day content calendar...")
+    state["logs"].append("[Planner] Generating lightweight strategy outline...")
 
     campaign_id = state.get("campaign_id", "")
     prefs_text = campaign_preferences.get_preferences_text(campaign_id) if campaign_id else ""
 
     timeframe_days = state.get("timeframe_days", 30)
     start_date = datetime.date.today()
-    all_dates = [(start_date + datetime.timedelta(days=i)).isoformat() for i in range(timeframe_days)]
+    calendar_dates = [(start_date + datetime.timedelta(days=i)).isoformat() for i in range(timeframe_days)]
 
-    chunks = [all_dates[i:i + _CALENDAR_CHUNK_SIZE] for i in range(0, len(all_dates), _CALENDAR_CHUNK_SIZE)]
+    user_prompt = (
+        f"Business: {_full_business_context(state)}\n"
+        f"Campaign goal: {state['campaign_goal']}\n"
+        f"Target audience: {state['target_audience']}\n"
+        f"Timeframe: {timeframe_days} days\n"
+        f"{prefs_text}"
+    )
 
-    calendar: Dict[str, Dict[str, Any]] = {}
-    ideas_so_far: List[str] = []
-    log_lines: List[str] = []
+    try:
+        from llm_client import generate_structured
+        from schemas import PlannerOutput
 
-    from llm_client import generate_structured
-    from schemas import PlannerOutput
-
-    for chunk_index, chunk_dates in enumerate(chunks):
-        continuity_note = (
-            f"Ideas already used earlier in this calendar (avoid repeating these): {ideas_so_far}\n"
-            if ideas_so_far else ""
-        )
-        user_prompt = (
-            f"Business: {_full_business_context(state)}\n"
-            f"Campaign goal: {state['campaign_goal']}\n"
-            f"Target audience: {state['target_audience']}\n"
-            f"This is chunk {chunk_index + 1} of {len(chunks)} of a {timeframe_days}-day calendar.\n"
-            f"Dates to plan in THIS chunk (use these exact date strings): {chunk_dates}\n"
-            f"{continuity_note}"
-            f"{prefs_text}"
-        )
-
-        try:
-            result: PlannerOutput = generate_structured(_PLANNER_SYSTEM_PROMPT, user_prompt, PlannerOutput)
-            for entry in result.calendar_plan.days:
-                if entry.date not in chunk_dates:
-                    continue  # ignore any stray/hallucinated date outside this chunk
-                calendar[entry.date] = {
-                    "idea": entry.idea,
-                    "platform": entry.platform,
-                    "needs_reference_photo": entry.needs_reference_photo,
-                }
-                ideas_so_far.append(entry.idea)
-
-            missing = [d for d in chunk_dates if d not in calendar]
-            if missing:
-                calendar.update(_fallback_pattern_for_dates(missing))
-                log_lines.append(
-                    f" \u26a0\ufe0f Chunk {chunk_index + 1}/{len(chunks)}: {len(missing)} date(s) missing from response, filled with fallback pattern."
-                )
-            else:
-                log_lines.append(f" \u2705 Chunk {chunk_index + 1}/{len(chunks)}: {len(chunk_dates)} days generated.")
-        except Exception as e:
-            calendar.update(_fallback_pattern_for_dates(chunk_dates))
-            log_lines.append(f" \u26a0\ufe0f Chunk {chunk_index + 1}/{len(chunks)} LLM call failed ({e}); used fallback pattern for these {len(chunk_dates)} days.")
-
-    log_lines.append(f"[Planner] Finished. {len(calendar)}-day calendar built across {len(chunks)} chunk(s) (awaiting approval).")
-    return {"calendar_plan": calendar, "plan_status": "draft", "logs": log_lines}
+        result: PlannerOutput = generate_structured(_PLANNER_SYSTEM_PROMPT, user_prompt, PlannerOutput)
+        outline = result.strategy_outline.model_dump()
+        return {
+            "strategy_outline": outline,
+            "calendar_dates": calendar_dates,
+            "calendar_plan": {},  # populated incrementally, one day at a time, as each day is actually generated
+            "plan_status": "draft",
+            "logs": [f"[Planner] Strategy outline generated ({len(outline.get('content_pillars', []))} content pillars), awaiting approval."],
+        }
+    except Exception as e:
+        fallback_outline = {
+            "content_pillars": ["Product highlight", "Behind the scenes", "Customer testimonial", "Educational tip", "Promotion"],
+            "tone": "friendly and approachable",
+            "platform_mix": "Instagram most days, Facebook a couple times a week",
+            "notes": None,
+        }
+        return {
+            "strategy_outline": fallback_outline,
+            "calendar_dates": calendar_dates,
+            "calendar_plan": {},
+            "plan_status": "draft",
+            "logs": [f"[Planner] LLM call failed ({e}); used fallback outline."],
+        }
 
 
 def _add_planning_nodes_and_edges(workflow: StateGraph) -> None:
@@ -272,7 +251,7 @@ def build_replan_graph_with_checkpointer(checkpointer):
     Used for plan-level 'refine': re-runs ONLY the planner node (context/
     research already happened once and don't need repeating), reading
     the newly-added preference from campaign_preferences and producing
-    a fresh calendar_plan, still in 'draft' status.
+    a fresh strategy_outline, still in 'draft' status.
     """
     workflow = StateGraph(MarketingState)
     workflow.add_node("master_planner_node", master_planner_node)
@@ -291,13 +270,22 @@ def build_replan_graph_with_checkpointer(checkpointer):
 #    to use," not "posted."
 # ---------------------------------------------------------
 
-_DAY_CONTENT_SYSTEM_PROMPT = """You are a social media copywriter and
-creative director. Given a business, its target audience, and today's
-planned content idea/platform, write:
-- caption: the actual post caption (under 280 characters, platform-
-  appropriate tone, no hashtag spam)
+_DAY_CONTENT_SYSTEM_PROMPT = """You are a social media strategist and
+copywriter. Given a business's strategy outline (content pillars, tone,
+platform mix) and where today falls in the campaign, decide TODAY's
+specific content idea and write it up.
+
+Respond ONLY with the structured output requested:
+- idea: today's specific content idea, drawn from the strategy's
+  content pillars — rotate through them, don't repeat a recently-used idea
+- platform: which single platform today's post targets, consistent
+  with the platform mix
+- needs_reference_photo: true if today's idea needs a real business-
+  supplied photo (product, founder, team, store) to be accurate rather
+  than a purely AI-imagined image; false otherwise
+- caption: the post caption (under 280 characters, matching the
+  strategy's tone, no hashtag spam)
 - image_prompt: a detailed visual description for an image generator
-  to create the accompanying image
 
 If a "Learned preferences" section is given, follow every point in it —
 these are standing instructions from the business owner accumulated
@@ -307,20 +295,28 @@ over the life of this campaign.
 
 def generate_daily_asset(state: Dict[str, Any], date: str) -> Dict[str, Any]:
     """
-    Generates ONE day's caption + image, for the given date, using that
-    day's entry in calendar_plan. Returns a dict with the same shape as
-    a partial MarketingState update — caller (CampaignManager) merges
-    this into persisted state.
+    Generates ONE day's idea + platform + reference-need + caption +
+    image, all in a SINGLE combined LLM call, using the campaign's
+    lightweight strategy_outline (not a precomputed per-day plan) plus
+    recently-used ideas for variety. This is what keeps token usage
+    low: the outline itself is cheap and generated once regardless of
+    timeframe length, and each day's specifics only get decided (and
+    paid for) at the moment that day is actually about to be reviewed
+    — never speculatively for days far in the future.
 
-    Every day always gets a real AI-generated image + caption — there is
-    no path where only a caption comes back. If the day's idea is
-    flagged needs_reference_photo (a real product/founder/store photo
-    would improve accuracy) and none has been supplied yet, the image
-    is still generated from the text prompt as a first-pass draft, and
-    the day is marked "awaiting_approval" like any other day — with an
-    additional note that a reference photo is available to improve it.
-    Uploading a reference photo later regenerates the image via
-    image-to-image on top of this draft; it was never a hard blocker.
+    Returns a dict with the same shape as a partial MarketingState
+    update — caller (CampaignManager) merges this into persisted state,
+    including writing this day's derived {idea, platform,
+    needs_reference_photo} into calendar_plan[date] for record-keeping.
+
+    Every day always gets a real AI-generated image + caption — there
+    is no path where only a caption comes back. If today's idea is
+    flagged needs_reference_photo and none has been supplied yet, the
+    image is still generated from the text prompt as a first-pass
+    placeholder draft, and the day is marked "awaiting_approval" like
+    any other day. Uploading a reference photo later regenerates the
+    image via image-to-image on top of this draft; it was never a hard
+    blocker.
     """
     import campaign_preferences
     from llm_client import generate_structured
@@ -328,33 +324,43 @@ def generate_daily_asset(state: Dict[str, Any], date: str) -> Dict[str, Any]:
     from image_clients import generate_image
 
     campaign_id = state.get("campaign_id", "")
-    calendar_plan = state.get("calendar_plan", {})
-    day_plan = calendar_plan.get(date)
-    if day_plan is None:
-        raise ValueError(f"No calendar entry for date={date!r}")
+    calendar_dates = state.get("calendar_dates") or []
+    if date not in calendar_dates:
+        raise ValueError(f"date={date!r} is not within this campaign's planned timeframe")
 
+    strategy_outline = state.get("strategy_outline") or {}
+    calendar_plan = state.get("calendar_plan") or {}
     prefs_text = campaign_preferences.get_preferences_text(campaign_id) if campaign_id else ""
     business_context = state.get("business_context", "")
     target_audience = state.get("target_audience", "")
 
+    day_index = calendar_dates.index(date) + 1
+    recent_ideas = [
+        calendar_plan[d]["idea"] for d in sorted(calendar_plan.keys()) if d < date and d in calendar_plan
+    ][-10:]
+
     user_prompt = (
         f"Business: {business_context}\n"
         f"Target audience: {target_audience}\n"
-        f"Today's idea: {day_plan['idea']}\n"
-        f"Platform: {day_plan['platform']}\n"
+        f"Strategy outline: {strategy_outline}\n"
+        f"Today is day {day_index} of {len(calendar_dates)} ({date}).\n"
+        f"Recently used ideas (avoid repeating these): {recent_ideas}\n"
         f"{prefs_text}"
     )
 
     try:
         content: DayContentOutput = generate_structured(_DAY_CONTENT_SYSTEM_PROMPT, user_prompt, DayContentOutput)
-        caption = content.caption
-        image_prompt = content.image_prompt
+        idea, platform, needs_reference = content.idea, content.platform, content.needs_reference_photo
+        caption, image_prompt = content.caption, content.image_prompt
     except Exception:
-        caption = f"{day_plan['idea']} \u2728"
-        image_prompt = f"Professional social media image: {day_plan['idea']}, for {business_context}"
+        pillars = strategy_outline.get("content_pillars") or ["Product highlight"]
+        idea = pillars[(day_index - 1) % len(pillars)]
+        platform = "instagram"
+        needs_reference = False
+        caption = f"{idea} \u2728"
+        image_prompt = f"Professional social media image: {idea}, for {business_context}"
 
     reference_images = state.get("reference_images") or {}
-    needs_reference = day_plan.get("needs_reference_photo", False)
     has_reference = date in reference_images
     used_placeholder_reference = needs_reference and not has_reference
 
@@ -383,6 +389,7 @@ def generate_daily_asset(state: Dict[str, Any], date: str) -> Dict[str, Any]:
         image_ok = False
 
     return {
+        "calendar_plan": {date: {"idea": idea, "platform": platform, "needs_reference_photo": needs_reference}},
         "generated_captions": {date: caption},
         "generated_images": {date: image_result},
         "asset_status": {date: "awaiting_approval" if image_ok else "pending_generation"},

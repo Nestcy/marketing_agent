@@ -21,7 +21,7 @@
 import atexit
 import threading
 from contextlib import ExitStack
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from langgraph.checkpoint.postgres import PostgresSaver
 
@@ -77,6 +77,7 @@ class CampaignManager:
             "target_audience": brief["target_audience"],
             "timeframe_days": brief.get("timeframe_days", 30),
             "user_plan": brief.get("user_plan", "free"),
+            "auto_generate_buffer_days": brief.get("auto_generate_buffer_days", 1),
             "business_website_url": brief.get("business_website_url"),
             "facebook_page_url": brief.get("facebook_page_url"),
             "reference_images": {},
@@ -92,7 +93,7 @@ class CampaignManager:
         current = self.get_status(campaign_id)
         if not current:
             raise ValueError(f"No campaign found for campaign_id={campaign_id!r}")
-        if not current.get("calendar_plan"):
+        if not current.get("strategy_outline"):
             raise ValueError("Cannot approve a plan that hasn't been generated yet.")
 
         self._graph.update_state({"configurable": {"thread_id": campaign_id}}, {"plan_status": "approved"})
@@ -133,6 +134,8 @@ class CampaignManager:
 
         result = generate_daily_asset(current, date)
 
+        calendar_plan = dict(current.get("calendar_plan") or {})
+        calendar_plan.update(result.get("calendar_plan", {}))
         captions = dict(current.get("generated_captions") or {})
         captions.update(result.get("generated_captions", {}))
         images = dict(current.get("generated_images") or {})
@@ -142,13 +145,54 @@ class CampaignManager:
 
         self._graph.update_state(
             {"configurable": {"thread_id": campaign_id}},
-            {"generated_captions": captions, "generated_images": images, "asset_status": statuses},
+            {"calendar_plan": calendar_plan, "generated_captions": captions, "generated_images": images, "asset_status": statuses},
         )
 
         event_type = "images_generated" if statuses.get(date) == "awaiting_approval" else "reference_photo_requested"
         campaign_events.log_event(campaign_id, event_type, payload={"date": date}, source="cron")
 
         return {"date": date, "status": statuses.get(date), "caption": captions.get(date), "image": images.get(date)}
+
+    def generate_days_ahead(self, campaign_id: str, count: int, source: str = "api") -> List[Dict[str, Any]]:
+        """
+        Generates the next `count` NOT-YET-GENERATED days ahead of
+        schedule, in order — e.g. a business can call this with count=5
+        to get a week's worth of drafts ready to review all at once,
+        rather than waiting one-per-day for the cron. Each day still
+        goes through the exact same generate_day_asset() call and lands
+        at the exact same "awaiting_approval" gate — this only changes
+        WHEN generation happens, not the review/approval mechanism.
+
+        Skips any date that's already been generated (present in
+        asset_status), regardless of its current status — this never
+        clobbers an existing draft or something already approved.
+        Stops early if it runs out of remaining un-generated days in
+        the campaign's timeframe.
+        """
+        current = self.get_status(campaign_id)
+        if not current:
+            raise ValueError(f"No campaign found for campaign_id={campaign_id!r}")
+        if current.get("plan_status") != "approved":
+            raise ValueError(f"Plan for campaign_id={campaign_id!r} is not approved yet.")
+
+        calendar_dates = sorted(current.get("calendar_dates") or [])
+        already_generated = set((current.get("asset_status") or {}).keys())
+        candidate_dates = [d for d in calendar_dates if d not in already_generated][:count]
+
+        results = []
+        for date in candidate_dates:
+            try:
+                result = self.generate_day_asset(campaign_id, date)
+                results.append(result)
+            except Exception as e:
+                results.append({"date": date, "status": "error", "error": str(e)})
+
+        campaign_events.log_event(
+            campaign_id, "days_generated_ahead",
+            payload={"requested": count, "dates": [r["date"] for r in results]},
+            source=source,
+        )
+        return results
 
     def approve_day(self, campaign_id: str, date: str) -> Dict[str, Any]:
         """
@@ -205,7 +249,11 @@ class CampaignManager:
 
         day_plan = (current.get("calendar_plan") or {}).get(date)
         if day_plan is None:
-            raise ValueError(f"No calendar entry for date={date!r}")
+            raise ValueError(
+                f"date={date!r} hasn't been generated yet — a day's specifics are only "
+                f"decided when it's generated, so generate this day first (generate_day_asset) "
+                f"before uploading a reference photo for it."
+            )
 
         prompt = (
             f"Create a professional social media image based on the attached reference photo.\n"

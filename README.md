@@ -9,14 +9,20 @@ this is organic crossposting.
 
 ## The two approval gates
 
-1. **Plan gate** — `start_campaign()` produces a full draft calendar.
-   Nothing gets generated yet. Owner either `approve_plan()`s it, or
-   `refine_plan()`s it with feedback (regenerates the whole calendar).
-2. **Day gate** — once approved, each day's draft (image + caption)
-   gets generated (by cron or on-demand) and sits at
-   `awaiting_approval`. Owner either `approve_day()`s it (→ **actually
-   publishes**) or `tweak_day()`s it with feedback (regenerates just
-   that day, still requires approval after).
+1. **Plan gate** — `start_campaign()` produces a LIGHTWEIGHT strategy
+   outline (content pillars, tone, platform mix) — NOT a full day-by-day
+   calendar. One small LLM call regardless of a 30 or 90 day timeframe;
+   this is the main token-savings change. Owner either `approve_plan()`s
+   it, or `refine_plan()`s it with feedback (regenerates the outline —
+   still one small call).
+2. **Day gate** — once approved, each day's draft (idea, platform,
+   reference-need, caption, and image, ALL decided in one combined call)
+   gets generated (by cron or on-demand) ONLY when that day is actually
+   about to be reviewed — never speculatively for future days — and sits
+   at `awaiting_approval`. Owner either `approve_day()`s it (finalizes
+   it — no publishing anywhere yet, that's a future Lovable-side
+   feature) or `tweak_day()`s it with feedback (regenerates just that
+   day, still requires approval after).
 
 **Feedback compounds.** Every `refine_plan`/`tweak_day` call appends to
 `campaign_preferences` (Postgres), and that full accumulated list gets

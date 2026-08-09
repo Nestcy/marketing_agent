@@ -96,6 +96,18 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "generate_days_ahead",
+            "description": "Generate several upcoming not-yet-generated days all at once (e.g. a week's worth) so the user can review multiple drafts in one sitting, instead of one per day. Each still needs individual review/approval afterward.",
+            "parameters": {
+                "type": "object",
+                "properties": {"campaign_id": {"type": "string"}, "count": {"type": "integer", "description": "How many upcoming days to generate, e.g. 5"}},
+                "required": ["campaign_id", "count"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "approve_day",
             "description": "Approve one specific day's draft — marks it finished and ready for the business to use. This platform doesn't post/crosspost anywhere yet.",
             "parameters": {
@@ -169,6 +181,7 @@ def _execute_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 return {"error": f"No campaign found for campaign_id={args['campaign_id']!r}"}
             return {
                 "plan_status": state.get("plan_status"),
+                "strategy_outline": state.get("strategy_outline"),
                 "calendar_plan": state.get("calendar_plan"),
                 "asset_status": state.get("asset_status"),
                 "generated_captions": state.get("generated_captions"),
@@ -184,6 +197,9 @@ def _execute_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
 
         if name == "generate_day":
             return manager.generate_day_asset(args["campaign_id"], args["date"])
+
+        if name == "generate_days_ahead":
+            return {"generated": manager.generate_days_ahead(args["campaign_id"], args["count"], source="chat")}
 
         if name == "approve_day":
             return manager.approve_day(args["campaign_id"], args["date"])

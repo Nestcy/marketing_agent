@@ -29,9 +29,12 @@ def _get_manager() -> CampaignManager:
 def generate_due_drafts() -> List[Dict[str, Any]]:
     """
     Runs daily at the time set in celery_app.py's beat_schedule. For
-    every approved campaign, checks if today's date is in calendar_plan
-    and hasn't been generated yet, and generates that one day's draft —
-    ready for the owner to review, never auto-published.
+    every approved campaign, keeps up to `auto_generate_buffer_days`
+    days generated and waiting for review, counting forward from today
+    (default buffer is 1 — just today). Days already generated
+    (present in asset_status, regardless of current status) are
+    skipped. A business can also trigger a larger batch on demand at
+    any time via generate_days_ahead(), independent of this setting.
     """
     manager = _get_manager()
     today = datetime.date.today().isoformat()
@@ -42,26 +45,26 @@ def generate_due_drafts() -> List[Dict[str, Any]]:
         if not state or state.get("plan_status") != "approved":
             continue
 
-        calendar_plan = state.get("calendar_plan") or {}
-        if today not in calendar_plan:
-            continue
-
+        calendar_dates = sorted(state.get("calendar_dates") or [])
+        buffer_days = state.get("auto_generate_buffer_days") or 1
         asset_status = state.get("asset_status") or {}
-        if today in asset_status:
-            continue  # already generated (or already handled) for today
 
-        try:
-            result = manager.generate_day_asset(campaign_id, today)
-            results.append({"campaign_id": campaign_id, "date": today, "result": result})
+        upcoming = [d for d in calendar_dates if d >= today and d not in asset_status]
+        due_dates = upcoming[:buffer_days]
 
-            if result.get("status") == "awaiting_approval":
-                notify_ready_for_review.delay(campaign_id, today)
-            else:
-                request_reference_image.delay(
-                    campaign_id, today, "Today's post needs a reference photo before it can be generated."
-                )
-        except Exception as e:
-            print(f"[tasks] Failed generating {campaign_id} / {today}: {e}")
+        for date in due_dates:
+            try:
+                result = manager.generate_day_asset(campaign_id, date)
+                results.append({"campaign_id": campaign_id, "date": date, "result": result})
+
+                if result.get("status") == "awaiting_approval":
+                    notify_ready_for_review.delay(campaign_id, date)
+                else:
+                    notify_generation_failed.delay(
+                        campaign_id, date, "Generation failed (e.g. image provider error) — check logs."
+                    )
+            except Exception as e:
+                print(f"[tasks] Failed generating {campaign_id} / {date}: {e}")
 
     return results
 
@@ -81,14 +84,17 @@ def notify_ready_for_review(campaign_id: str, date: str) -> None:
     )
 
 
-@celery_app.task(name="tasks.request_reference_image")
-def request_reference_image(campaign_id: str, date: str, reason: str) -> None:
+@celery_app.task(name="tasks.notify_generation_failed")
+def notify_generation_failed(campaign_id: str, date: str, reason: str) -> None:
     """
-    Fires when a day's idea needs a reference photo that hasn't been
-    supplied. Notification hook — same TODO as above.
+    Fires when a day's draft generation actually failed (e.g. an image
+    provider error) — reference photos no longer block generation at
+    all (see generate_daily_asset's placeholder-image behavior), so
+    this is purely a real-failure alert now, not a "needs a photo"
+    notice. Notification hook — same TODO as above.
     """
-    print(f"[ACTION NEEDED] campaign={campaign_id} date={date}: {reason}")
+    print(f"[GENERATION FAILED] campaign={campaign_id} date={date}: {reason}")
     import campaign_events
     campaign_events.log_event(
-        campaign_id, "reference_photo_requested", payload={"date": date, "reason": reason}, source="cron"
+        campaign_id, "generation_failed", payload={"date": date, "reason": reason}, source="cron"
     )

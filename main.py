@@ -55,6 +55,7 @@ class StartCampaignRequest(BaseModel):
     target_audience: str = Field(..., example="Young professionals and students nearby.")
     timeframe_days: int = Field(30, description="30 or 90 — how many days of content to plan.")
     user_plan: str = Field("free", description="'free' (Gemini free-tier images) or 'paid' (DALL-E 3 / Stable Diffusion).")
+    auto_generate_buffer_days: int = Field(1, ge=1, le=14, description="How many days ahead the daily cron keeps generated/awaiting review, beyond just today. Default 1 (today only) — raise this if you want the cron to always keep a few days' worth of drafts ready.")
     business_website_url: Optional[str] = None
     facebook_page_url: Optional[str] = None
 
@@ -65,6 +66,10 @@ class RefineRequest(BaseModel):
 
 class TweakRequest(BaseModel):
     feedback: str = Field(..., example="Make the caption punchier and shorter.")
+
+
+class GenerateAheadRequest(BaseModel):
+    count: int = Field(..., gt=0, le=30, description="How many not-yet-generated days to generate ahead of schedule, in order.")
 
 
 class ChatMessage(BaseModel):
@@ -145,6 +150,25 @@ def generate_day(campaign_id: str, date: str):
     return result
 
 
+@app.post("/api/campaign/{campaign_id}/days/generate-ahead")
+def generate_days_ahead(campaign_id: str, request: GenerateAheadRequest):
+    """
+    Generate the next `count` not-yet-generated days all at once, ahead
+    of the daily cron — e.g. a business can request a week's worth of
+    drafts to review in one sitting instead of waiting one day at a
+    time. Each day generated this way still lands at
+    asset_status="awaiting_approval" and goes through the exact same
+    approve/tweak review gate as a cron-generated day — this only
+    changes when generation happens, not how it's reviewed.
+    """
+    manager = get_manager()
+    try:
+        results = manager.generate_days_ahead(campaign_id, request.count)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"campaign_id": campaign_id, "generated": results}
+
+
 @app.post("/api/campaign/{campaign_id}/day/{date}/approve")
 def approve_day(campaign_id: str, date: str):
     """
@@ -196,6 +220,8 @@ def campaign_status(campaign_id: str):
         "campaign_id": campaign_id,
         "is_running": manager.is_running(campaign_id),
         "plan_status": state.get("plan_status"),
+        "strategy_outline": state.get("strategy_outline"),
+        "calendar_dates": state.get("calendar_dates"),
         "calendar_plan": state.get("calendar_plan"),
         "generated_captions": state.get("generated_captions"),
         "generated_images": state.get("generated_images"),

@@ -1,8 +1,11 @@
 """
-Smoke test for the v3 architecture: the planning graph (research ->
-calendar draft) and the standalone daily asset generator. Runs without
-real API keys by monkeypatching image_clients, research_clients, and
-llm_client.
+Smoke test for the outline-based architecture: the planning graph now
+produces a LIGHTWEIGHT strategy outline (one small LLM call, same cost
+regardless of 30 vs 90 day timeframe), and each day's specifics
+(idea/platform/reference-need/caption/image_prompt) are decided in ONE
+combined call only when that day is actually generated — not upfront.
+Runs without real API keys by monkeypatching image_clients,
+research_clients, campaign_preferences, and llm_client.
 """
 import sys
 import io
@@ -29,139 +32,137 @@ def mock_generate_image(prompt: str, model_preference: str = "gemini_free", **kw
 
 image_clients.generate_image = mock_generate_image
 
-# ---- Monkeypatch llm_client so no real Groq calls happen ----
-import llm_client
-from schemas import PlannerOutput, CalendarPlan, DayPlanEntry, DayContentOutput
-
-def mock_generate_structured(system_prompt, user_prompt, schema, **kwargs):
-    if schema is PlannerOutput:
-        today = datetime.date.today()
-        entries = []
-        for i in range(3):  # small calendar for the test
-            date = (today + datetime.timedelta(days=i)).isoformat()
-            entries.append(DayPlanEntry(
-                date=date,
-                idea=f"Test idea {i}",
-                platform="instagram",
-                needs_reference_photo=(i == 1),  # middle day needs a reference photo
-            ))
-        return PlannerOutput(calendar_plan=CalendarPlan(days=entries))
-    if schema is DayContentOutput:
-        return DayContentOutput(caption="Mock caption \u2728", image_prompt="Mock image prompt")
-    raise ValueError(f"Unexpected schema in test: {schema}")
-
-llm_client.generate_structured = mock_generate_structured
-
 # ---- Monkeypatch campaign_preferences (no real Postgres in this test) ----
 import campaign_preferences
 campaign_preferences.get_preferences_text = lambda campaign_id: ""
 
+# ---- Monkeypatch llm_client so no real Groq calls happen ----
+import llm_client
+from schemas import PlannerOutput, StrategyOutline, DayContentOutput
+
+_planner_call_count = {"n": 0}
+_day_call_count = {"n": 0}
+
+def mock_generate_structured(system_prompt, user_prompt, schema, **kwargs):
+    if schema is PlannerOutput:
+        _planner_call_count["n"] += 1
+        return PlannerOutput(strategy_outline=StrategyOutline(
+            content_pillars=["Product highlight", "Behind the scenes", "Customer testimonial", "Quick tip"],
+            tone="warm and casual",
+            platform_mix="Instagram most days, Facebook a couple times a week",
+            notes=None,
+        ))
+    if schema is DayContentOutput:
+        _day_call_count["n"] += 1
+        # Alternate needs_reference_photo so we exercise both paths
+        needs_ref = (_day_call_count["n"] % 2 == 0)
+        return DayContentOutput(
+            idea=f"Test idea #{_day_call_count['n']}",
+            platform="instagram",
+            needs_reference_photo=needs_ref,
+            caption="Mock caption \u2728",
+            image_prompt="Mock image prompt",
+        )
+    raise ValueError(f"Unexpected schema in test: {schema}")
+
+llm_client.generate_structured = mock_generate_structured
+
 from marketing_engine import build_graph, generate_daily_asset
 
 print("=" * 60)
-print("  TEST 1 — Planning graph produces a day-keyed calendar")
+print("  TEST 1 — Planning graph produces a LIGHTWEIGHT outline")
+print("            (one call, regardless of 30 vs 90 day timeframe)")
 print("=" * 60)
 
 app = build_graph()
-initial_state = {
-    "campaign_id": "test-campaign",
-    "business_context": "A neighborhood coffee shop.",
-    "campaign_goal": "Increase foot traffic.",
-    "target_audience": "Local young professionals.",
-    "timeframe_days": 3,
-    "user_plan": "free",
-    "reference_images": {},
-    "logs": [],
-}
 
-final_state = {}
-for output in app.stream(initial_state):
-    for node_name, value in output.items():
-        final_state.update(value)
-        print(f"\n--- Node: {node_name} ---")
-        for log in value.get("logs", []):
-            print(f"  {log}")
+for timeframe in (30, 90):
+    _planner_call_count["n"] = 0
+    initial_state = {
+        "campaign_id": "test-campaign",
+        "business_context": "A neighborhood coffee shop.",
+        "campaign_goal": "Increase foot traffic.",
+        "target_audience": "Local young professionals.",
+        "timeframe_days": timeframe,
+        "user_plan": "free",
+        "reference_images": {},
+        "logs": [],
+    }
 
-calendar = final_state.get("calendar_plan", {})
-assert len(calendar) == 3, f"Expected 3 days in calendar, got {len(calendar)}"
-assert final_state.get("plan_status") == "draft", "Plan should be in draft status, not auto-approved"
-print(f"\n✅ Calendar has {len(calendar)} days, plan_status='draft' (awaiting approval, as expected)")
+    final_state = {}
+    for output in app.stream(initial_state):
+        for node_name, value in output.items():
+            final_state.update(value)
+
+    outline = final_state.get("strategy_outline")
+    calendar_dates = final_state.get("calendar_dates")
+    assert outline is not None, "strategy_outline should be populated"
+    assert len(outline.get("content_pillars", [])) >= 3, "Outline should have content pillars"
+    assert len(calendar_dates) == timeframe, f"Expected {timeframe} calendar_dates, got {len(calendar_dates)}"
+    assert final_state.get("calendar_plan") == {}, "calendar_plan should start EMPTY — populated incrementally, not upfront"
+    assert final_state.get("plan_status") == "draft", "Plan should be draft, not auto-approved"
+    assert _planner_call_count["n"] == 1, f"Expected exactly 1 planner call regardless of timeframe, got {_planner_call_count['n']}"
+    print(f"\n✅ timeframe_days={timeframe}: 1 planner call, {len(outline['content_pillars'])} pillars, "
+          f"{len(calendar_dates)} calendar_dates computed, calendar_plan empty (as expected)")
 
 print("\n" + "=" * 60)
-print("  TEST 2 — Daily asset generation (per-day, standalone)")
+print("  TEST 2 — Per-day generation: ONE combined call decides")
+print("            idea+platform+reference-need+caption+image_prompt")
 print("=" * 60)
 
-dates = sorted(calendar.keys())
-normal_day, reference_day = dates[0], dates[1]
+_day_call_count["n"] = 0
+state_for_generation = dict(final_state)  # 90-day state from the loop above
+state_for_generation["plan_status"] = "approved"
+dates = sorted(state_for_generation["calendar_dates"])[:4]
 
-state_for_generation = dict(final_state)
-state_for_generation["plan_status"] = "approved"  # simulate approval
+results = []
+for date in dates:
+    result = generate_daily_asset(state_for_generation, date)
+    results.append(result)
+    # merge into state like CampaignManager would, so recent_ideas accumulates
+    # and asset_status reflects what's already been generated
+    state_for_generation["calendar_plan"] = {**state_for_generation.get("calendar_plan", {}), **result["calendar_plan"]}
+    state_for_generation["asset_status"] = {**state_for_generation.get("asset_status", {}), **result["asset_status"]}
 
-# Day without a reference-photo requirement — generates fully, not a placeholder
-result_normal = generate_daily_asset(state_for_generation, normal_day)
-assert result_normal["asset_status"][normal_day] == "awaiting_approval", \
-    f"Expected awaiting_approval, got {result_normal['asset_status']}"
-assert result_normal["generated_images"][normal_day]["is_placeholder"] is False, \
-    "Day with no reference-photo requirement should not be flagged as a placeholder"
-print(f"\n✅ {normal_day}: generated normally -> awaiting_approval, is_placeholder=False")
+assert _day_call_count["n"] == len(dates), f"Expected exactly 1 combined LLM call per day, got {_day_call_count['n']} for {len(dates)} days"
+print(f"\n✅ {len(dates)} days generated with exactly {_day_call_count['n']} combined LLM calls (1 per day, not 2)")
 
-# Day WITH a reference-photo requirement, none supplied yet — STILL generates an
-# image now (as a flagged placeholder), never leaves the day caption-only
-result_placeholder = generate_daily_asset(state_for_generation, reference_day)
-assert result_placeholder["asset_status"][reference_day] == "awaiting_approval", \
-    f"Expected awaiting_approval (placeholder image still generated), got {result_placeholder['asset_status']}"
-assert "generated_images" in result_placeholder and reference_day in result_placeholder["generated_images"], \
-    "Should have generated a placeholder image even without the reference photo"
-assert result_placeholder["generated_images"][reference_day]["is_placeholder"] is True, \
-    "Day needing a reference photo, with none supplied, should be flagged is_placeholder=True"
-print(f"✅ {reference_day}: generated placeholder image (is_placeholder=True) -> awaiting_approval, caption also drafted")
+for date, result in zip(dates, results):
+    day_entry = result["calendar_plan"][date]
+    image = result["generated_images"][date]
+    status = result["asset_status"][date]
+    assert status == "awaiting_approval", f"{date}: expected awaiting_approval, got {status}"
+    if day_entry["needs_reference_photo"]:
+        assert image["is_placeholder"] is True, f"{date}: needs_reference_photo=True should mean is_placeholder=True"
+        print(f"✅ {date}: idea={day_entry['idea']!r}, needs_reference_photo=True -> is_placeholder=True, still generated")
+    else:
+        assert image["is_placeholder"] is False, f"{date}: needs_reference_photo=False should mean is_placeholder=False"
+        print(f"✅ {date}: idea={day_entry['idea']!r}, needs_reference_photo=False -> is_placeholder=False")
 
 print("\n✅ All checks passed.")
 
 print("\n" + "=" * 60)
-print("  TEST 3 — Multi-chunk planning (90 days, one chunk fails)")
+print("  TEST 3 — generate_days_ahead: batch-generates N upcoming")
+print("            days, skipping ones already generated")
 print("=" * 60)
 
-from marketing_engine import _CALENDAR_CHUNK_SIZE
+# Simulate CampaignManager.generate_days_ahead's selection logic directly
+# against the state we already built (days 0-3 generated in TEST 2).
+calendar_dates_sorted = sorted(state_for_generation["calendar_dates"])
+already_generated = set(state_for_generation.get("asset_status", {}).keys())
+candidate_dates = [d for d in calendar_dates_sorted if d not in already_generated][:5]
 
-call_count = {"n": 0}
+assert len(candidate_dates) == 5, f"Expected 5 fresh candidate dates, got {len(candidate_dates)}"
+assert not (set(candidate_dates) & already_generated), "generate_days_ahead must never re-select an already-generated day"
+print(f"\n✅ Correctly selected {len(candidate_dates)} fresh dates, none overlapping the {len(already_generated)} already generated")
 
-def mock_generate_structured_chunked(system_prompt, user_prompt, schema, **kwargs):
-    if schema is not PlannerOutput:
-        return mock_generate_structured(system_prompt, user_prompt, schema, **kwargs)
+_day_call_count["n"] = 0
+for date in candidate_dates:
+    result = generate_daily_asset(state_for_generation, date)
+    state_for_generation["calendar_plan"] = {**state_for_generation.get("calendar_plan", {}), **result["calendar_plan"]}
+    state_for_generation["asset_status"] = {**state_for_generation.get("asset_status", {}), **result["asset_status"]}
 
-    call_count["n"] += 1
-    # Simulate the 2nd chunk failing outright, like a real tool_use_failed error
-    if call_count["n"] == 2:
-        raise RuntimeError("simulated tool_use_failed")
-
-    # Pull the chunk's dates back out of the prompt (crude but fine for a test)
-    import re
-    dates_in_prompt = re.findall(r"\d{4}-\d{2}-\d{2}", user_prompt)
-    entries = [
-        DayPlanEntry(date=d, idea=f"Idea for {d}", platform="instagram", needs_reference_photo=False)
-        for d in dates_in_prompt
-    ]
-    return PlannerOutput(calendar_plan=CalendarPlan(days=entries))
-
-llm_client.generate_structured = mock_generate_structured_chunked
-
-state_90 = dict(initial_state)
-state_90["timeframe_days"] = 90
-final_state_90 = {}
-for output in app.stream(state_90):
-    for node_name, value in output.items():
-        final_state_90.update(value)
-        if node_name == "master_planner_node":
-            for log in value.get("logs", []):
-                print(f"  {log}")
-
-calendar_90 = final_state_90.get("calendar_plan", {})
-expected_chunks = -(-90 // _CALENDAR_CHUNK_SIZE)  # ceil division
-assert len(calendar_90) == 90, f"Expected 90 days total (chunk failure should still fall back, not drop days), got {len(calendar_90)}"
-assert call_count["n"] == expected_chunks, f"Expected {expected_chunks} chunk calls, got {call_count['n']}"
-print(f"\n✅ 90-day calendar has all 90 days despite chunk 2 failing outright ({expected_chunks} chunk calls made, chunk 2 fell back correctly)")
-
-llm_client.generate_structured = mock_generate_structured  # restore for any later use
+assert _day_call_count["n"] == 5, f"Expected 5 combined LLM calls for the 5-day batch, got {_day_call_count['n']}"
+print(f"✅ Batch of {len(candidate_dates)} days generated with exactly {_day_call_count['n']} combined LLM calls")
 
 print("\n✅ All checks passed.")
