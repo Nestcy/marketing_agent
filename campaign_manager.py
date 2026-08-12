@@ -80,9 +80,9 @@ class CampaignManager:
             "auto_generate_buffer_days": brief.get("auto_generate_buffer_days", 1),
             "business_website_url": brief.get("business_website_url"),
             "facebook_page_url": brief.get("facebook_page_url"),
-            "reference_images": {},
             "generated_captions": {},
-            "generated_images": {},
+            "ad_copy_variants": {},
+            "image_prompts": {},
             "asset_status": {},
             "logs": [],
         }
@@ -120,11 +120,10 @@ class CampaignManager:
 
     def generate_day_asset(self, campaign_id: str, date: str) -> Dict[str, Any]:
         """
-        Generates (or regenerates) the caption + image for ONE day.
-        Only proceeds if plan_status == "approved". Leaves the day in
-        asset_status="awaiting_approval" (or "pending_generation" if it
-        needs a reference photo that hasn't been supplied) — never
-        publishes.
+        Generates (or regenerates) the caption, ad copy variants, and
+        image prompt for ONE day. Only proceeds if plan_status ==
+        "approved". Leaves the day at asset_status="awaiting_approval"
+        — never publishes.
         """
         current = self.get_status(campaign_id)
         if not current:
@@ -138,20 +137,33 @@ class CampaignManager:
         calendar_plan.update(result.get("calendar_plan", {}))
         captions = dict(current.get("generated_captions") or {})
         captions.update(result.get("generated_captions", {}))
-        images = dict(current.get("generated_images") or {})
-        images.update(result.get("generated_images", {}))
+        ad_copy_variants = dict(current.get("ad_copy_variants") or {})
+        ad_copy_variants.update(result.get("ad_copy_variants", {}))
+        image_prompts = dict(current.get("image_prompts") or {})
+        image_prompts.update(result.get("image_prompts", {}))
         statuses = dict(current.get("asset_status") or {})
         statuses.update(result.get("asset_status", {}))
 
         self._graph.update_state(
             {"configurable": {"thread_id": campaign_id}},
-            {"calendar_plan": calendar_plan, "generated_captions": captions, "generated_images": images, "asset_status": statuses},
+            {
+                "calendar_plan": calendar_plan,
+                "generated_captions": captions,
+                "ad_copy_variants": ad_copy_variants,
+                "image_prompts": image_prompts,
+                "asset_status": statuses,
+            },
         )
 
-        event_type = "images_generated" if statuses.get(date) == "awaiting_approval" else "reference_photo_requested"
-        campaign_events.log_event(campaign_id, event_type, payload={"date": date}, source="cron")
+        campaign_events.log_event(campaign_id, "content_generated", payload={"date": date}, source="cron")
 
-        return {"date": date, "status": statuses.get(date), "caption": captions.get(date), "image": images.get(date)}
+        return {
+            "date": date,
+            "status": statuses.get(date),
+            "caption": captions.get(date),
+            "ad_copy_variants": ad_copy_variants.get(date),
+            "image_prompt": image_prompts.get(date),
+        }
 
     def generate_days_ahead(self, campaign_id: str, count: int, source: str = "api") -> List[Dict[str, Any]]:
         """
@@ -222,7 +234,8 @@ class CampaignManager:
             "date": date,
             "status": "approved",
             "caption": (current.get("generated_captions") or {}).get(date),
-            "image": (current.get("generated_images") or {}).get(date),
+            "ad_copy_variants": (current.get("ad_copy_variants") or {}).get(date),
+            "image_prompt": (current.get("image_prompts") or {}).get(date),
         }
 
     def tweak_day(self, campaign_id: str, date: str, feedback: str) -> Dict[str, Any]:
@@ -234,60 +247,6 @@ class CampaignManager:
         campaign_preferences.add_preference(campaign_id, feedback)
         campaign_events.log_event(campaign_id, "asset_tweaked", payload={"date": date, "feedback": feedback}, source="api")
         return self.generate_day_asset(campaign_id, date)
-
-    def tweak_image(self, campaign_id: str, date: str, feedback: str) -> Dict[str, Any]:
-        """
-        Appends image refinement feedback to learned preferences and regenerates
-        specifically the image asset for this day using the image model.
-        """
-        campaign_preferences.add_preference(campaign_id, f"Image style preference: {feedback}")
-        campaign_events.log_event(campaign_id, "image_tweaked", payload={"date": date, "feedback": feedback}, source="api")
-        return self.generate_day_asset(campaign_id, date)
-
-    def submit_reference_image(self, campaign_id: str, date: str, image_bytes: bytes) -> Dict[str, Any]:
-        """
-        Business supplies a real reference photo for a day that needs
-        one. Regenerates that day's image via image-to-image and marks
-        it awaiting_approval.
-        """
-        from image_clients import generate_image
-
-        current = self.get_status(campaign_id)
-        if not current:
-            raise ValueError(f"No campaign found for campaign_id={campaign_id!r}")
-
-        day_plan = (current.get("calendar_plan") or {}).get(date)
-        if day_plan is None:
-            raise ValueError(
-                f"date={date!r} hasn't been generated yet — a day's specifics are only "
-                f"decided when it's generated, so generate this day first (generate_day_asset) "
-                f"before uploading a reference photo for it."
-            )
-
-        prompt = (
-            f"Create a professional social media image based on the attached reference photo.\n"
-            f"Business: {current.get('business_context', '')}\n"
-            f"Idea: {day_plan['idea']}\n"
-            f"Preserve the actual product/subject shown in the reference photo."
-        )
-        user_plan = current.get("user_plan") or "free"
-        model = "gemini_free" if user_plan != "paid" else "stable_diffusion"
-        result = generate_image(prompt=prompt, model_preference=model, reference_image=image_bytes)
-        result["is_placeholder"] = False
-
-        images = dict(current.get("generated_images") or {})
-        images[date] = result
-        reference_images = dict(current.get("reference_images") or {})
-        reference_images[date] = "provided"
-        statuses = dict(current.get("asset_status") or {})
-        statuses[date] = "awaiting_approval"
-
-        self._graph.update_state(
-            {"configurable": {"thread_id": campaign_id}},
-            {"generated_images": images, "reference_images": reference_images, "asset_status": statuses},
-        )
-        campaign_events.log_event(campaign_id, "reference_photo_uploaded", payload={"date": date}, source="api")
-        return result
 
     # -----------------------------------------------------
     # Reads

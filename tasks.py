@@ -3,10 +3,10 @@
 #
 # Daily cron: for every campaign with plan_status="approved", checks
 # whether today's date has a calendar entry that hasn't been generated
-# yet, generates that day's caption + image, and STOPS — leaves it at
-# asset_status="awaiting_approval" (or "pending_generation" if it needs
-# a reference photo). Publishing only ever happens via
-# CampaignManager.approve_day(), triggered by a human, never by cron.
+# yet, generates that day's caption + ad copy variants + image prompt,
+# and STOPS — leaves it at asset_status="awaiting_approval". Publishing
+# only ever happens via CampaignManager.approve_day(), triggered by a
+# human, never by cron.
 # ---------------------------------------------------------
 
 import datetime
@@ -58,18 +58,14 @@ def generate_due_drafts() -> List[Dict[str, Any]]:
                 results.append({"campaign_id": campaign_id, "date": date, "result": result})
 
                 day_plan = (result.get("calendar_plan") or {}).get(date, {})
-                needs_ref = day_plan.get("needs_reference_photo", False)
-                ref_images = state.get("reference_images") or {}
-                has_ref = date in ref_images
-
-                if needs_ref and not has_ref:
-                    notify_reference_needed.delay(campaign_id, date)
+                if day_plan.get("needs_reference_photo"):
+                    notify_reference_suggested.delay(campaign_id, date)
 
                 if result.get("status") == "awaiting_approval":
                     notify_ready_for_review.delay(campaign_id, date)
                 else:
                     notify_generation_failed.delay(
-                        campaign_id, date, "Generation failed (e.g. image provider error) — check logs."
+                        campaign_id, date, "Generation failed — check logs."
                     )
             except Exception as e:
                 print(f"[tasks] Failed generating {campaign_id} / {date}: {e}")
@@ -90,16 +86,17 @@ def notify_ready_for_review(campaign_id: str, date: str) -> None:
     )
 
 
-@celery_app.task(name="tasks.notify_reference_needed")
-def notify_reference_needed(campaign_id: str, date: str) -> None:
+@celery_app.task(name="tasks.notify_reference_suggested")
+def notify_reference_suggested(campaign_id: str, date: str) -> None:
     """
-    Fires when today's generated asset identified that a real reference photo is needed
-    to render a personalized style image accurately.
+    Fires when today's generated idea would land better with the
+    business's own real photo than a generic/stock visual. Purely
+    informational — nothing is blocked or regenerated on this.
     """
-    print(f"[REFERENCE NEEDED] campaign={campaign_id} date={date}: real photo requested for personalized style asset.")
+    print(f"[REFERENCE SUGGESTED] campaign={campaign_id} date={date}: consider using your own photo for this one.")
     import campaign_events
     campaign_events.log_event(
-        campaign_id, "reference_photo_requested", payload={"date": date}, source="cron"
+        campaign_id, "reference_photo_suggested", payload={"date": date}, source="cron"
     )
 
 

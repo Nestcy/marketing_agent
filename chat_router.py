@@ -84,7 +84,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "generate_day",
-            "description": "Generate (or regenerate) the caption + image draft for one specific day. Only works once the plan is approved.",
+            "description": "Generate (or regenerate) the caption, ad copy variants, and image prompt for one specific day. Only works once the plan is approved.",
             "parameters": {
                 "type": "object",
                 "properties": {"campaign_id": {"type": "string"}, "date": {"type": "string", "description": "ISO date, e.g. 2026-08-10"}},
@@ -131,18 +131,6 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "tweak_image",
-            "description": "The user specifically wants to tweak or refine the generated image for ONE day. Records image style feedback and regenerates the visual asset.",
-            "parameters": {
-                "type": "object",
-                "properties": {"campaign_id": {"type": "string"}, "date": {"type": "string"}, "feedback": {"type": "string"}},
-                "required": ["campaign_id", "date", "feedback"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "list_campaigns",
             "description": "List all campaign_ids that have ever been started.",
             "parameters": {"type": "object", "properties": {}},
@@ -153,21 +141,21 @@ TOOLS = [
 _SYSTEM_PROMPT = """You are the conversational front-end for an organic
 content marketing platform. Flow: a campaign starts with a 3-day (3d)
 content calendar draft, which the business owner must approve (or ask for
-changes to) before any daily content gets generated. Once approved, each day's
-actual ad (image + caption) gets generated via daily tasks or on demand, and
-asks for image references when personalized style images require real photos.
-Each day's draft must be approved individually by the business owner, who can
-also tweak or refine the images whenever they wish.
+changes to) before any daily content gets generated. Once approved, each
+day's content — caption, a few ad copy variants, and a ready-to-use
+image_prompt (a text-to-image prompt the business can paste into an
+image generation tool of their own choice) — gets generated via daily
+tasks or on demand. Each day's draft must be approved individually by
+the business owner, who can also tweak or refine it whenever they wish.
 
 Distinguish carefully between:
 - refine_plan: feedback about the OVERALL 3-day calendar/strategy
-- tweak_day: feedback about ONE specific day's draft
-- tweak_image: feedback specifically targeting ONE day's generated image visual style
+- tweak_day: feedback about ONE specific day's draft (caption, ad copy, or image prompt)
 Ask which the user means if it's ambiguous.
 
 If the user hasn't given a campaign_id for an action that needs one, ask, or offer to list their campaigns. Never invent campaign_id or date values.
 
-Reference photo uploads happen via a separate file-upload UI element, not through you — direct users there if they mention uploading a photo.
+If a day's draft is flagged as needing a reference photo, mention that the business should use their own photo for that one rather than the AI-imagined prompt — this platform doesn't generate images itself.
 """
 
 
@@ -191,6 +179,8 @@ def _execute_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 "calendar_plan": state.get("calendar_plan"),
                 "asset_status": state.get("asset_status"),
                 "generated_captions": state.get("generated_captions"),
+                "ad_copy_variants": state.get("ad_copy_variants"),
+                "image_prompts": state.get("image_prompts"),
             }
 
         if name == "approve_plan":
@@ -212,9 +202,6 @@ def _execute_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
 
         if name == "tweak_day":
             return manager.tweak_day(args["campaign_id"], args["date"], args["feedback"])
-
-        if name == "tweak_image":
-            return manager.tweak_image(args["campaign_id"], args["date"], args["feedback"])
 
         if name == "list_campaigns":
             return {"campaign_ids": manager.list_campaign_ids()}

@@ -17,7 +17,7 @@ class MarketingState(TypedDict):
     target_audience: str
     timeframe_days: int  # 30 or 90, business chooses
 
-    user_plan: Optional[str]  # "free" or "paid" — gates image model tier
+    user_plan: Optional[str]  # "free" or "paid" — reserved for future plan-gated features
 
     # How many days ahead the daily cron should try to keep generated
     # and waiting for review, beyond just today. Default 1 (today only).
@@ -49,9 +49,9 @@ class MarketingState(TypedDict):
     # Per-day asset state (populated incrementally, one day at a time —
     # NOT all generated up front)
     generated_captions: Optional[Dict[str, str]]      # date -> caption
-    generated_images: Optional[Dict[str, Dict[str, str]]]  # date -> {model, local_path, url}
-    asset_status: Optional[Dict[str, str]]            # date -> "pending_generation" | "awaiting_approval" | "approved" | "published"
-    reference_images: Optional[Dict[str, str]]        # date -> "provided"
+    ad_copy_variants: Optional[Dict[str, List[str]]]  # date -> [variant, variant, ...]
+    image_prompts: Optional[Dict[str, str]]           # date -> text-to-image prompt (for the business to use in a tool of their choice)
+    asset_status: Optional[Dict[str, str]]            # date -> "awaiting_approval" | "approved" | "published"
 
     logs: Annotated[List[str], operator.add]
 
@@ -280,12 +280,16 @@ Respond ONLY with the structured output requested:
   content pillars — rotate through them, don't repeat a recently-used idea
 - platform: which single platform today's post targets, consistent
   with the platform mix
-- needs_reference_photo: true if today's idea needs a real business-
-  supplied photo (product, founder, team, store) to be accurate rather
-  than a purely AI-imagined image; false otherwise
-- caption: the post caption (under 280 characters, matching the
-  strategy's tone, no hashtag spam)
-- image_prompt: a detailed visual description for an image generator
+- needs_reference_photo: true if this idea would land better with a
+  real business-supplied photo (product, founder, team, store) than a
+  generic/stock visual — informational, just flags it to the business
+- caption: the primary post caption (under 280 characters, matching
+  the strategy's tone, no hashtag spam)
+- ad_copy_variants: 2-3 alternative short ad copy variants on the same
+  idea (different hooks/angles), for the business to A/B test or pick from
+- image_prompt: a detailed, ready-to-use text-to-image prompt (subject,
+  style, composition, lighting, mood) the business can paste into an
+  image generation tool of their choice
 
 If a "Learned preferences" section is given, follow every point in it —
 these are standing instructions from the business owner accumulated
@@ -296,32 +300,30 @@ over the life of this campaign.
 def generate_daily_asset(state: Dict[str, Any], date: str) -> Dict[str, Any]:
     """
     Generates ONE day's idea + platform + reference-need + caption +
-    image, all in a SINGLE combined LLM call, using the campaign's
-    lightweight strategy_outline (not a precomputed per-day plan) plus
-    recently-used ideas for variety. This is what keeps token usage
-    low: the outline itself is cheap and generated once regardless of
-    timeframe length, and each day's specifics only get decided (and
-    paid for) at the moment that day is actually about to be reviewed
-    — never speculatively for days far in the future.
+    ad copy variants + image prompt, all in a SINGLE combined LLM call,
+    using the campaign's lightweight strategy_outline (not a
+    precomputed per-day plan) plus recently-used ideas for variety.
+    This is what keeps token usage low: the outline itself is cheap
+    and generated once regardless of timeframe length, and each day's
+    specifics only get decided (and paid for) at the moment that day
+    is actually about to be reviewed — never speculatively for days
+    far in the future.
 
     Returns a dict with the same shape as a partial MarketingState
     update — caller (CampaignManager) merges this into persisted state,
     including writing this day's derived {idea, platform,
     needs_reference_photo} into calendar_plan[date] for record-keeping.
 
-    Every day always gets a real AI-generated image + caption — there
-    is no path where only a caption comes back. If today's idea is
-    flagged needs_reference_photo and none has been supplied yet, the
-    image is still generated from the text prompt as a first-pass
-    placeholder draft, and the day is marked "awaiting_approval" like
-    any other day. Uploading a reference photo later regenerates the
-    image via image-to-image on top of this draft; it was never a hard
-    blocker.
+    No image is generated here — the platform produces the caption, ad
+    copy variants, and a ready-to-use image_prompt (text-to-image
+    prompt) that the business can paste into an image generation tool
+    of their own choice. needs_reference_photo is purely informational:
+    it tells the business this idea would land better with their own
+    real photo than a generic/stock visual.
     """
     import campaign_preferences
     from llm_client import generate_structured
     from schemas import DayContentOutput
-    from image_clients import generate_image
 
     campaign_id = state.get("campaign_id", "")
     calendar_dates = state.get("calendar_dates") or []
@@ -351,48 +353,34 @@ def generate_daily_asset(state: Dict[str, Any], date: str) -> Dict[str, Any]:
     try:
         content: DayContentOutput = generate_structured(_DAY_CONTENT_SYSTEM_PROMPT, user_prompt, DayContentOutput)
         idea, platform, needs_reference = content.idea, content.platform, content.needs_reference_photo
-        caption, image_prompt = content.caption, content.image_prompt
+        caption, ad_copy_variants, image_prompt = content.caption, content.ad_copy_variants, content.image_prompt
     except Exception:
         pillars = strategy_outline.get("content_pillars") or ["Product highlight"]
         idea = pillars[(day_index - 1) % len(pillars)]
         platform = "instagram"
         needs_reference = False
         caption = f"{idea} \u2728"
+        ad_copy_variants = [caption]
         image_prompt = f"Professional social media image: {idea}, for {business_context}"
 
-    reference_images = state.get("reference_images") or {}
-    has_reference = date in reference_images
-    used_placeholder_reference = needs_reference and not has_reference
-
-    if used_placeholder_reference:
-        # No real photo yet — still generate a real image, just make the
-        # prompt explicit that this is a stand-in composition rather than
-        # the actual product/subject, so it reads as plausible generic
-        # content instead of confidently wrong specifics.
+    if needs_reference:
+        # Purely informational — no generation is gated on this. Just
+        # makes sure the note travels with the prompt so the business
+        # sees it wherever image_prompt is surfaced.
         image_prompt = (
             f"{image_prompt}\n\n"
-            f"Note: this is a placeholder/stand-in image — do not invent "
-            f"specific branding, logos, or exact product details. Keep it "
-            f"generic and stylistically appropriate; it will be replaced "
-            f"with an accurate version once the business supplies a real "
-            f"reference photo."
+            f"Note: this idea will land best with your own real photo "
+            f"(product, founder, team, or venue) rather than a purely "
+            f"AI-generated image — use this prompt as a starting point "
+            f"only if you don't have one to use."
         )
-
-    user_plan = state.get("user_plan") or "free"
-    model = "gemini_free" if user_plan != "paid" else "dalle3"
-    try:
-        image_result = generate_image(prompt=image_prompt, model_preference=model)
-        image_result["is_placeholder"] = used_placeholder_reference
-        image_ok = True
-    except Exception as e:
-        image_result = {"model": model, "url": None, "error": str(e), "is_placeholder": used_placeholder_reference}
-        image_ok = False
 
     return {
         "calendar_plan": {date: {"idea": idea, "platform": platform, "needs_reference_photo": needs_reference}},
         "generated_captions": {date: caption},
-        "generated_images": {date: image_result},
-        "asset_status": {date: "awaiting_approval" if image_ok else "pending_generation"},
+        "ad_copy_variants": {date: ad_copy_variants},
+        "image_prompts": {date: image_prompt},
+        "asset_status": {date: "awaiting_approval"},
     }
 
 
@@ -412,7 +400,6 @@ if __name__ == "__main__":
         "user_plan": "free",
         "business_website_url": None,
         "facebook_page_url": None,
-        "reference_images": {},
         "logs": [],
     }
 

@@ -4,7 +4,7 @@
 # ---------------------------------------------------------
 import os
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -195,29 +195,6 @@ def tweak_day(campaign_id: str, date: str, request: TweakRequest):
     return result
 
 
-@app.post("/api/campaign/{campaign_id}/day/{date}/tweak-image")
-def tweak_image(campaign_id: str, date: str, request: TweakRequest):
-    """Records image style feedback and regenerates specifically the image asset for this day using the image model."""
-    manager = get_manager()
-    try:
-        result = manager.tweak_image(campaign_id, date, request.feedback)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return result
-
-
-@app.post("/api/campaign/{campaign_id}/day/{date}/reference-image")
-async def submit_reference_image(campaign_id: str, date: str, file: UploadFile = File(...)):
-    """Business uploads a real reference photo for a day that needs one. Regenerates that day's image."""
-    manager = get_manager()
-    image_bytes = await file.read()
-    try:
-        result = manager.submit_reference_image(campaign_id, date, image_bytes)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return {"status": "generated", "date": date, "result": result}
-
-
 # ---------------------------------------------------------
 # Reads
 # ---------------------------------------------------------
@@ -235,7 +212,8 @@ def campaign_status(campaign_id: str):
         "calendar_dates": state.get("calendar_dates"),
         "calendar_plan": state.get("calendar_plan"),
         "generated_captions": state.get("generated_captions"),
-        "generated_images": state.get("generated_images"),
+        "ad_copy_variants": state.get("ad_copy_variants"),
+        "image_prompts": state.get("image_prompts"),
         "asset_status": state.get("asset_status"),
         "logs": state.get("logs", []),
     }
