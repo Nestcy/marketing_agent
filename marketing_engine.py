@@ -191,8 +191,11 @@ def master_planner_node(state: MarketingState):
     try:
         from llm_client import generate_structured
         from schemas import PlannerOutput
+        import config
 
-        result: PlannerOutput = generate_structured(_PLANNER_SYSTEM_PROMPT, user_prompt, PlannerOutput)
+        result: PlannerOutput = generate_structured(
+            _PLANNER_SYSTEM_PROMPT, user_prompt, PlannerOutput, model=config.groq_planner_model()
+        )
         outline = result.strategy_outline.model_dump()
         return {
             "strategy_outline": outline,
@@ -324,6 +327,7 @@ def generate_daily_asset(state: Dict[str, Any], date: str) -> Dict[str, Any]:
     import campaign_preferences
     from llm_client import generate_structured
     from schemas import DayContentOutput
+    import config
 
     campaign_id = state.get("campaign_id", "")
     calendar_dates = state.get("calendar_dates") or []
@@ -351,7 +355,9 @@ def generate_daily_asset(state: Dict[str, Any], date: str) -> Dict[str, Any]:
     )
 
     try:
-        content: DayContentOutput = generate_structured(_DAY_CONTENT_SYSTEM_PROMPT, user_prompt, DayContentOutput)
+        content: DayContentOutput = generate_structured(
+            _DAY_CONTENT_SYSTEM_PROMPT, user_prompt, DayContentOutput, model=config.groq_day_model()
+        )
         idea, platform, needs_reference = content.idea, content.platform, content.needs_reference_photo
         caption, ad_copy_variants, image_prompt = content.caption, content.ad_copy_variants, content.image_prompt
     except Exception:

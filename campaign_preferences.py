@@ -88,11 +88,21 @@ def get_preferences(campaign_id: str) -> List[Dict[str, Any]]:
         return _in_memory_prefs.get(campaign_id, [])
 
 
-def get_preferences_text(campaign_id: str) -> str:
-    """Flattened, prompt-ready block of every preference learned so far, oldest first."""
+def get_preferences_text(campaign_id: str, limit: int = 12) -> str:
+    """
+    Flattened, prompt-ready block of the most recent `limit` preferences,
+    oldest-of-that-set first. Capped rather than unbounded — early on this
+    made no difference, but on a long-running campaign with lots of
+    refine/tweak feedback, re-including the ENTIRE history in every single
+    planner and per-day generation call was compounding token usage on
+    every request as the campaign matured. Most recent feedback is also
+    just more relevant than feedback from weeks ago that's likely already
+    reflected in later drafts.
+    """
     prefs = get_preferences(campaign_id)
     if not prefs:
         return ""
-    lines = [f"- {p['preference_text']}" for p in prefs]
+    recent = prefs[-limit:]
+    lines = [f"- {p['preference_text']}" for p in recent]
     return "Learned preferences from the business owner (apply all of these):\n" + "\n".join(lines)
 

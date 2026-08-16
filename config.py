@@ -9,7 +9,10 @@
 # export OPENAI_API_KEY="sk-..."         # optional, paid-tier image gen
 # export STABILITY_API_KEY="sk-..."      # optional, paid-tier image gen
 # export GROQ_API_KEY="gsk_..."
-# export GROQ_MODEL="...."
+# export GROQ_MODEL="..."               # default/fallback model for all Groq calls
+# export GROQ_PLANNER_MODEL="..."       # optional override, just for the strategy outline call
+# export GROQ_DAY_MODEL="..."           # optional override, just for per-day generation
+# export GROQ_CHAT_MODEL="..."          # optional override, just for the chat router
 # export TAVILY_API_KEY="tvly-..."       # business research (search)
 # export FIRECRAWL_API_KEY="..."         # business research (scrape)
 # export FACEBOOK_ACCESS_TOKEN="..."     # organic posting
@@ -57,7 +60,23 @@ def groq_api_key() -> str:
 
 
 def groq_model() -> str:
+    """Default/fallback model, used wherever a more specific model isn't set."""
     return os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+
+def groq_planner_model() -> str:
+    """Model used for the one-time strategy outline call. Falls back to GROQ_MODEL if unset."""
+    return os.environ.get("GROQ_PLANNER_MODEL") or groq_model()
+
+
+def groq_day_model() -> str:
+    """Model used for per-day content generation (caption/ad copy/image prompt). Falls back to GROQ_MODEL if unset."""
+    return os.environ.get("GROQ_DAY_MODEL") or groq_model()
+
+
+def groq_chat_model() -> str:
+    """Model used for the conversational chat router. Falls back to GROQ_MODEL if unset."""
+    return os.environ.get("GROQ_CHAT_MODEL") or groq_model()
 
 
 def tavily_api_key() -> str:

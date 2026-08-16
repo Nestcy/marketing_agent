@@ -17,12 +17,19 @@ TAVILY_URL = "https://api.tavily.com/search"
 FIRECRAWL_SCRAPE_URL = "https://api.firecrawl.dev/v1/scrape"
 FIRECRAWL_SEARCH_URL = "https://api.firecrawl.dev/v1/search"
 
+# Hard cap on how much raw research text is allowed into a single LLM
+# prompt. Uncapped scrapes/search results were the single biggest cause
+# of blowing through per-request/per-minute token limits — a full page
+# scrape alone could run 10-50k+ tokens with no cap at all.
+_MAX_CHARS_PER_SOURCE = 3000
+
 
 def tavily_search(query: str, max_results: int = 5) -> Optional[str]:
     """
     General web search — used to research a business's public
     reputation, reviews, competitors, and recent news.
     Returns a flattened text blob of result titles + snippets, or None.
+    Capped at _MAX_CHARS_PER_SOURCE total.
     """
     try:
         api_key = config.tavily_api_key()
@@ -45,15 +52,16 @@ def tavily_search(query: str, max_results: int = 5) -> Optional[str]:
         results = data.get("results", [])
         if not results:
             return None
-        return "\n\n".join(
+        blob = "\n\n".join(
             f"{r.get('title', '')}\n{r.get('content', '')}" for r in results
         )
+        return blob[:_MAX_CHARS_PER_SOURCE]
     except Exception:
         return None
 
 
 def firecrawl_scrape(url: str) -> Optional[str]:
-    """Deep-scrapes a single known URL (typically the business's own website) into clean markdown."""
+    """Deep-scrapes a single known URL (typically the business's own website) into clean markdown, capped at _MAX_CHARS_PER_SOURCE."""
     try:
         api_key = config.firecrawl_api_key()
     except Exception:
@@ -68,13 +76,14 @@ def firecrawl_scrape(url: str) -> Optional[str]:
         )
         resp.raise_for_status()
         data = resp.json()
-        return data.get("data", {}).get("markdown")
+        markdown = data.get("data", {}).get("markdown")
+        return markdown[:_MAX_CHARS_PER_SOURCE] if markdown else None
     except Exception:
         return None
 
 
 def firecrawl_search(query: str, limit: int = 3) -> Optional[str]:
-    """Used when no website URL was supplied — searches the web via Firecrawl and returns scraped content."""
+    """Used when no website URL was supplied — searches the web via Firecrawl and returns scraped content, capped at _MAX_CHARS_PER_SOURCE."""
     try:
         api_key = config.firecrawl_api_key()
     except Exception:
@@ -92,8 +101,9 @@ def firecrawl_search(query: str, limit: int = 3) -> Optional[str]:
         results = data.get("data", [])
         if not results:
             return None
-        return "\n\n".join(
+        blob = "\n\n".join(
             f"{r.get('title', '')}\n{r.get('description', '')}" for r in results
         )
+        return blob[:_MAX_CHARS_PER_SOURCE]
     except Exception:
         return None

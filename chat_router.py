@@ -7,6 +7,7 @@
 # ---------------------------------------------------------
 
 import json
+import time
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -173,14 +174,45 @@ def _execute_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             state = manager.get_status(args["campaign_id"])
             if state is None:
                 return {"error": f"No campaign found for campaign_id={args['campaign_id']!r}"}
+
+            # Deliberately NOT dumping every day's full caption/ad-copy/
+            # image-prompt text here — on a long-running campaign that
+            # payload only grows, and it gets re-sent to the model on
+            # EVERY chat turn (the frontend resends full history each
+            # message), which was compounding token usage badly the
+            # longer a campaign went on. Give the model just enough to
+            # answer "what's going on" and point it at generate_day/
+            # get a specific date's detail only when actually needed.
+            asset_status = state.get("asset_status") or {}
+            status_counts: Dict[str, int] = {}
+            for s in asset_status.values():
+                status_counts[s] = status_counts.get(s, 0) + 1
+
+            today_str = None
+            calendar_dates = sorted(state.get("calendar_dates") or [])
+            import datetime
+            today = datetime.date.today().isoformat()
+            upcoming_or_today = [d for d in calendar_dates if d >= today]
+            focus_date = upcoming_or_today[0] if upcoming_or_today else (calendar_dates[-1] if calendar_dates else None)
+
+            focus_detail = None
+            if focus_date and focus_date in asset_status:
+                focus_detail = {
+                    "date": focus_date,
+                    "status": asset_status.get(focus_date),
+                    "caption": (state.get("generated_captions") or {}).get(focus_date),
+                    "ad_copy_variants": (state.get("ad_copy_variants") or {}).get(focus_date),
+                    "image_prompt": (state.get("image_prompts") or {}).get(focus_date),
+                }
+
             return {
                 "plan_status": state.get("plan_status"),
                 "strategy_outline": state.get("strategy_outline"),
-                "calendar_plan": state.get("calendar_plan"),
-                "asset_status": state.get("asset_status"),
-                "generated_captions": state.get("generated_captions"),
-                "ad_copy_variants": state.get("ad_copy_variants"),
-                "image_prompts": state.get("image_prompts"),
+                "total_days_in_calendar": len(calendar_dates),
+                "days_by_status": status_counts,
+                "generated_dates": sorted(asset_status.keys()),
+                "most_relevant_day": focus_detail,
+                "note": "Full detail for other specific dates is available via generate_day (regenerates) — ask the user which date they mean if they want an older day's content re-surfaced.",
             }
 
         if name == "approve_plan":
@@ -211,6 +243,31 @@ def _execute_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": str(e)}
 
 
+def _post_groq_chat_with_retry(headers: dict, payload: dict, max_retries: int = 2) -> requests.Response:
+    """
+    Same rate-limit-tolerant retry behavior as llm_client.generate_structured
+    — waits out a 429 (using Retry-After when the response provides it,
+    capped at 90s) and retries, instead of surfacing the error to the
+    caller. On the free tier, per-minute windows reset quickly enough
+    that this is invisible as long as the frontend shows something
+    engaging (rotating status text) during the wait.
+    """
+    attempt = 0
+    while True:
+        resp = requests.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=100)
+        if resp.status_code == 429 and attempt < max_retries:
+            retry_after = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
+            try:
+                wait_seconds = min(float(retry_after), 90) if retry_after else 90
+            except ValueError:
+                wait_seconds = 90
+            time.sleep(wait_seconds)
+            attempt += 1
+            continue
+        resp.raise_for_status()
+        return resp
+
+
 def handle_chat_message(messages: List[Dict[str, str]]) -> Dict[str, Any]:
     """
     Returns {"reply": str, "tool_calls": [{"name", "arguments", "result"}, ...]}
@@ -221,18 +278,15 @@ def handle_chat_message(messages: List[Dict[str, str]]) -> Dict[str, Any]:
     executed_tool_calls: List[Dict[str, Any]] = []
 
     for _ in range(4):
-        resp = requests.post(
-            GROQ_CHAT_URL,
-            headers=headers,
-            json={
-                "model": config.groq_model(),
+        resp = _post_groq_chat_with_retry(
+            headers,
+            {
+                "model": config.groq_chat_model(),
                 "messages": payload_messages,
                 "tools": TOOLS,
                 "tool_choice": "auto",
             },
-            timeout=20,
         )
-        resp.raise_for_status()
         message = resp.json()["choices"][0]["message"]
 
         tool_calls = message.get("tool_calls")
