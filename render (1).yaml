@@ -1,0 +1,95 @@
+databases:
+  - name: marketing-agent-db
+    plan: starter
+    postgresMajorVersion: "16"
+
+services:
+  - type: redis
+    name: marketing-agent-redis
+    plan: starter
+    ipAllowList: []
+
+  - type: web
+    name: marketing-agent-web
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: POSTGRES_CONN_STRING
+        fromDatabase:
+          name: marketing-agent-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: marketing-agent-redis
+          type: redis
+          property: connectionString
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: FIRECRAWL_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        sync: false
+      - key: GROQ_PLANNER_MODEL
+        sync: false
+      - key: GROQ_DAY_MODEL
+        sync: false
+      - key: GROQ_CHAT_MODEL
+        sync: false
+
+  - type: worker
+    name: marketing-agent-celery-worker
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: celery -A celery_app worker --loglevel=info
+    envVars:
+      - key: POSTGRES_CONN_STRING
+        fromDatabase:
+          name: marketing-agent-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: marketing-agent-redis
+          type: redis
+          property: connectionString
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: FIRECRAWL_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        sync: false
+      - key: GROQ_PLANNER_MODEL
+        sync: false
+      - key: GROQ_DAY_MODEL
+        sync: false
+      - key: GROQ_CHAT_MODEL
+        sync: false
+
+  - type: worker
+    name: marketing-agent-celery-beat
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: celery -A celery_app beat --loglevel=info
+    envVars:
+      - key: POSTGRES_CONN_STRING
+        fromDatabase:
+          name: marketing-agent-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: marketing-agent-redis
+          type: redis
+          property: connectionString
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: FIRECRAWL_API_KEY
+        sync: false
